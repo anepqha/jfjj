@@ -58,7 +58,10 @@ def _start_health_server():
                 self.end_headers()
                 self.wfile.write(f"JAFJ OK - {len(os.listdir(CLIENTS_DIR)) if os.path.exists(CLIENTS_DIR) else 0} clients".encode())
             def log_message(self, *a): pass
-        with socketserver.TCPServer(("0.0.0.0", port), Handler) as httpd:
+        class ReusableTCPServer(socketserver.TCPServer):
+            allow_reuse_address = True
+            allow_reuse_port = True
+        with ReusableTCPServer(("0.0.0.0", port), Handler) as httpd:
             print(f"  🌐 Health server on 0.0.0.0:{port} - برای جلوگیری از Sleep رایگان")
             httpd.serve_forever()
     except Exception as e:
@@ -1816,6 +1819,19 @@ class Manager:
                 self._live.pop()
 
     async def say(self, uid, text, buttons=None):
+        """ارسال پیام با ضد تکرار ساده."""
+        # ── ضد تکرار: اگه همین متن اخیراً به همین کاربر فرستاده شده، رد کن ──
+        msg_key = f"say:{uid}:{hash(text[:200])}"
+        now_t = time.time()
+        if not hasattr(self.say, "_last"):
+            self.say._last = {}
+        last_send = self.say._last.get(msg_key, 0)
+        if now_t - last_send < 2:
+            return True
+        self.say._last[msg_key] = now_t
+        if len(self.say._last) > 500:
+            cutoff = now_t - 30
+            self.say._last = {k: v for k, v in self.say._last.items() if v > cutoff}
         try:
             r = await self.bot.send_message(uid, text, parse_mode="html",
                                             link_preview=False, buttons=buttons)
@@ -1833,23 +1849,17 @@ class Manager:
                 return False
 
     async def edit(self, ev, text, buttons=None):
-        """ویرایش پیام فعلی؛ اگر نشد، پیام تازه می‌فرستد."""
+        """ویرایش پیام فعلی.
+        فقط edit می‌کنه و اگه نشد، هیچ پیام جدیدی نمی‌فرسته تا از تکرار جلوگیری بشه."""
         try:
             await ev.edit(text, parse_mode="html", link_preview=False,
                           buttons=buttons)
             self._mark(getattr(ev, "message_id", None))
             return True
-        except Exception:
-            try:
-                r = await self.bot.send_message(ev.chat_id, text,
-                                                parse_mode="html",
-                                                link_preview=False,
-                                                buttons=buttons)
-                if buttons:
-                    self._mark(getattr(r, "id", None))
-                return True
-            except Exception:
-                return False
+        except Exception as e:
+            # اگه edit نشد، هیچ کاری نکن — پیام جدید نفرست تا duplicate نشه
+            print(f"edit failed: {type(e).__name__}: {e}")
+            return False
 
     async def hide_reply_keyboard(self, chat):
         """ReplyKeyboard را از چت حذف می‌کند؛ کیبورد اینلاین منو جداست."""
@@ -2563,6 +2573,20 @@ class Manager:
                 await ev.answer(t)
             except Exception:
                 pass
+
+        # ── ضد تکرار: جلوی پردازش همزمان callback مشابه ──
+        cb_key = f"{uid}:{data}"
+        now_cb = time.time()
+        if not hasattr(self, "_cb_dedup"):
+            self._cb_dedup = {}
+        last_cb = self._cb_dedup.get(cb_key, 0)
+        if now_cb - last_cb < 2:
+            return await ans()
+        self._cb_dedup[cb_key] = now_cb
+        # پاک‌کردن ورودی‌های قدیمی
+        if len(self._cb_dedup) > 500:
+            cutoff = now_cb - 10
+            self._cb_dedup = {k: v for k, v in self._cb_dedup.items() if v > cutoff}
 
         # دکمه‌های منو بعد از ری‌استارت هم معتبر بمانند.
         # رفتن به هر صفحه‌ی دیگر، مرحله‌ی نیمه‌کاره را پاک می‌کند
@@ -5631,6 +5655,7 @@ class Manager:
 
 def main():
     print(f"\n{BUILD_TAG}", flush=True)
+    print(f"  🆔 PID: {os.getpid()} — فقط یک پروسه باید این خط را نشان دهد", flush=True)
     # همیشه از پوشه‌ی خود فایل اجرا کن تا اگر از جای دیگری اجرا شد،
     # 95.py قدیمیِ پوشه‌ی فعلی اشتباهی انتخاب نشود.
     try:
