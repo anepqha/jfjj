@@ -1,10 +1,7 @@
 {
-  "$schema": "https://schema.up.railway.app/railway.json",
-  "build": {
-    "builder": "dockerfile"
-  },
+  "build": { "builder": "dockerfile" },
   "deploy": {
-    "startCommand": "manager_82.py",
-    "restartPolicyType": "always"
+    "startCommand": "python manager_82.py",
+    "restartPolicyType": "onFailure"
   }
 }
