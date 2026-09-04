@@ -1,13 +1,8 @@
 FROM python:3.11-slim
-
 WORKDIR /app
-
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
+RUN pip install -r requirements.txt
 COPY manager_82.py ./
-
-ENV DATA_DIR=/data
-ENV PYTHONUNBUFFERED=1
-
+COPY 95.py ./
+COPY 95.json ./95.py
 CMD ["python", "manager_82.py"]
