@@ -43,8 +43,11 @@ import string
 import signal
 import sqlite3
 import asyncio
+import shutil
 import subprocess
+import tempfile
 import threading
+import zipfile
 
 # --- فیکس آف شدن بعد 30 دقیقه بدون فعالیت (Railway) - وب سرور سالم ---
 def _start_health_server():
@@ -278,6 +281,21 @@ class Shop:
                 return [dict(r) for r in cur.fetchall()]
             self.c.commit()
             return cur.lastrowid
+
+    def close(self):
+        """بستن اتصال (برای بازیابی پشتیبان)."""
+        try:
+            with self.lock:
+                try:
+                    self.c.commit()
+                except Exception:
+                    pass
+                try:
+                    self.c.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     # ═══════════════ پلن‌ها ═══════════════
     def add_plan(self, name, days, price, max_accounts=1, features="", sort=0):
@@ -1024,7 +1042,81 @@ BOT_TOKEN = "8789173370:AAFldI-budd0hsXlVRnOlLndl3e5wOeb5aU"
 API_ID = 28039994
 API_HASH = "00877cdcd706564a4de6abf7f7d64349"
 ADMIN_IDS = [8287266200]
-BUILD_TAG = "JAFJ_MANAGER_82_SELFPATH_FIX_2026_09_05"
+BUILD_VERSION = "v0905-fix2"
+BUILD_TAG = "JAFJ_MANAGER_82_v0905-fix2_2026_09_05"
+
+# ── نشست ذخیره‌شده ربات مدیر (جلوگیری از ImportBotAuthorization در هر بوت) ──
+BOT_SESSION_FILE = os.path.join(BASE_DIR, "manager_bot.string")
+# ── پشتیبان خودکار روی تلگرام ──
+BACKUP_TAG = "JAFJBACKUP1"
+
+
+def build_stamp():
+    """مُهر نسخه برای پایین پیام‌ها (تشخیص از روی اسکرین‌شات)."""
+    try:
+        s = globals().get("SELFBOT") or ""
+        bn = os.path.basename(s) if s else "?"
+        dn = os.path.dirname(s) if s else "?"
+        return f"build {BUILD_VERSION} · self {bn} در {dn} · cwd {os.getcwd()}"
+    except Exception:
+        return f"build {BUILD_VERSION}"
+
+
+def backup_interval():
+    """فاصله پشتیبان خودکار: max(120, BACKUP_EVERY=900)."""
+    try:
+        v = int((os.environ.get("BACKUP_EVERY") or "900").strip() or "900")
+    except Exception:
+        v = 900
+    return max(120, v)
+
+
+def backup_target_raw():
+    return (os.environ.get("BACKUP_CHAT") or "").strip()
+
+
+def maybe_migrate_to_data_dir():
+    """اگر DATA_DIR تنظیم شد و داده کنار اسکریپت بود، یک‌بار و بدون بازنویسی منتقل کن."""
+    data_dir = (os.environ.get("DATA_DIR") or "").strip()
+    if not data_dir:
+        return []
+    try:
+        target = os.path.abspath(BASE_DIR)
+        script_d = os.path.dirname(os.path.abspath(__file__))
+        if os.path.abspath(target) == os.path.abspath(script_d):
+            return []
+        moved = []
+        for name in ("manager.db", "shop.db", "manager_config.json",
+                     "manager_bot.string", "jafj_ai.json"):
+            s = os.path.join(script_d, name)
+            d = os.path.join(target, name)
+            try:
+                if os.path.isfile(s) and not os.path.exists(d):
+                    shutil.copy2(s, d)
+                    moved.append(name)
+                    print(f"  \U0001F4E6 مهاجرت {name} به DATA_DIR", flush=True)
+            except Exception as e:
+                print(f"  \u26A0\uFE0F مهاجرت {name}: {e}", flush=True)
+        sc = os.path.join(script_d, "clients")
+        dc = os.path.join(target, "clients")
+        try:
+            if os.path.isdir(sc) and not os.path.exists(dc):
+                shutil.copytree(sc, dc)
+                moved.append("clients/")
+                print("  \U0001F4E6 مهاجرت clients/ به DATA_DIR", flush=True)
+        except Exception as e:
+            print(f"  \u26A0\uFE0F مهاجرت clients: {e}", flush=True)
+        return moved
+    except Exception as e:
+        print(f"  \u26A0\uFE0F مهاجرت DATA_DIR: {e}", flush=True)
+        return []
+
+
+# مهاجرت زودهنگام (قبل از ساخت DB) تا فایل خالی در مقصد ساخته نشود
+try:
+    maybe_migrate_to_data_dir()
+except Exception:
+    pass
 
 DEFAULTS = {
     "bot_token": BOT_TOKEN,
@@ -1160,11 +1252,37 @@ class Config:
                     self.d["restart_fee"] = 10
             except Exception as e:
                 print(f"⚠️ خواندن تنظیمات: {e}")
-        # مقادیر اتصال و مدیر مستقیماً از همین فایل Python خوانده شوند.
-        self.d["bot_token"] = BOT_TOKEN
-        self.d["api_id"] = API_ID
-        self.d["api_hash"] = API_HASH
-        self.d["admin_ids"] = list(ADMIN_IDS)
+        # اولویت اتصال: متغیر محیطی → manager_config.json → هاردکد.
+        # قبلاً هاردکد همیشه روی فایل می‌نشست و api_id شخصی کاربر هیچ‌وقت
+        # اعمال نمی‌شد؛ api_id مشترک دلیل اصلی FloodWait روی ورود بود.
+        _env_token = (os.environ.get("BOT_TOKEN") or "").strip()
+        if _env_token:
+            self.d["bot_token"] = _env_token
+        _env_api_id = (os.environ.get("API_ID") or "").strip()
+        if _env_api_id:
+            try:
+                self.d["api_id"] = int(_env_api_id)
+            except ValueError:
+                self.d["api_id"] = _env_api_id
+        _env_api_hash = (os.environ.get("API_HASH") or "").strip()
+        if _env_api_hash:
+            self.d["api_hash"] = _env_api_hash
+        # مدیر: متغیر محیطی ADMIN_IDS → فایل → هاردکد (قبلاً همیشه هاردکد بود)
+        _env_admins = (os.environ.get("ADMIN_IDS") or "").strip()
+        if _env_admins:
+            try:
+                _ids = []
+                for _tok in re.split(r"[,\s]+", _env_admins):
+                    _tok = _tok.strip()
+                    if not _tok:
+                        continue
+                    _ids.append(int(_tok))
+                if _ids:
+                    self.d["admin_ids"] = _ids
+            except Exception:
+                pass
+        if not self.d.get("admin_ids"):
+            self.d["admin_ids"] = list(ADMIN_IDS)
         # مقدار قدیمی ۱۰ برای شروع، اکنون ۲۰ امتیاز است.
         if self.d.get("start_fee") in (None, 10):
             self.d["start_fee"] = 20
@@ -1264,6 +1382,21 @@ class DB:
                 return [dict(r) for r in cur.fetchall()]
             self.c.commit()
             return cur.lastrowid
+
+    def close(self):
+        """بستن اتصال (برای بازیابی پشتیبان)."""
+        try:
+            with self.lock:
+                try:
+                    self.c.commit()
+                except Exception:
+                    pass
+                try:
+                    self.c.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def get(self, uid):
         return self.x("SELECT * FROM clients WHERE uid=?", (uid,), "one")
@@ -1545,9 +1678,38 @@ class Supervisor:
             self.last_failure[uid] = "manager"
             return False, "ظرفیت اجرای همزمان تکمیل است"
         folder = self.folder(uid)
-        if not os.path.exists(os.path.join(folder, "jafj.session")):
-            self.last_failure[uid] = "manager"
-            return False, "سشن ندارد"
+        _sess_file = os.path.join(folder, "jafj.session")
+        if not os.path.exists(_sess_file):
+            # اگر DB سشن دارد ولی فایل نیست (مثلاً بعد از بازیابی پشتیبان)، بازسازی کن
+            _c0 = None
+            try:
+                _c0 = self.db.get(uid) if hasattr(self.db, "get") else None
+            except Exception:
+                _c0 = None
+            if _c0 and _c0.get("session"):
+                try:
+                    _plan = None
+                    try:
+                        if self.mgr:
+                            _plan = self.mgr.effective_plan(uid)
+                    except Exception:
+                        _plan = None
+                    _mx0 = 1
+                    try:
+                        if _plan:
+                            _mx0 = max(1, int(_plan.get("max_accounts", 1) or 1))
+                    except Exception:
+                        pass
+                    self.prepare(uid, _c0["session"], _c0.get("phone") or "", _mx0, _plan)
+                except Exception as e:
+                    self.last_failure[uid] = "manager"
+                    return False, f"بازسازی سشن نشد: {e}"
+                if not os.path.exists(_sess_file):
+                    self.last_failure[uid] = "manager"
+                    return False, "سشن ندارد"
+            else:
+                self.last_failure[uid] = "manager"
+                return False, "سشن ندارد"
         # قبل از هر اجرا/ری‌استارت، هم امتیاز و هم محدودیت جدید پلن را Sync کن.
         if self.mgr:
             try:
@@ -2251,6 +2413,11 @@ class Manager:
             "حالا برو به <b>Saved Messages</b> اکانتت و بفرست:\n"
             "<code>.panel</code>\n\n"
             "<i>همه‌ی تنظیمات از همان‌جاست.</i>")
+        # مُهر نسخه پایین پیام راه‌اندازی (تشخیص از روی اسکرین‌شات)
+        try:
+            txt = txt + f"\n\n{self.LINE}\n<i>{build_stamp()}</i>"
+        except Exception:
+            pass
         kb = [[B("⚙️ سرویس من", "m:svc", "primary")]]
         if not ok:
             kb = []
@@ -2790,6 +2957,10 @@ class Manager:
                     t.append(f"⚠️  {st['last_error'][:60]}")
             elif live:
                 t += [self.LINE, "<i>گزارش زنده هنوز نرسیده…</i>"]
+            try:
+                t += [self.LINE, f"<i>{build_stamp()}</i>"]
+            except Exception:
+                pass
             return await self.edit(ev, "\n".join(t),
                 [[B("🔄 بروزرسانی", "m:status")], back_btn()])
 
@@ -4298,6 +4469,11 @@ class Manager:
 
         if cmd == "status":
             live = self.sup.is_running(uid)
+            _stamp = ""
+            try:
+                _stamp = f"\n{self.LINE}\n<i>{build_stamp()}</i>"
+            except Exception:
+                pass
             return await self.say(chat,
                 f"📊 <b>وضعیت شما</b>\n\n"
                 f"اکانت: {c['name'] or '—'}\n"
@@ -4307,7 +4483,7 @@ class Manager:
                    f"≈{_fa_digits(self.hours_left(uid))} ساعت\n"
                    if self.shop and self.cfg["points_on"] else "")
                 + f"پروسه: {'روشن' if live else 'خاموش'}\n"
-                + f"ری‌استارت: {_fa_digits(c['restarts'] or 0)}")
+                + f"ری‌استارت: {_fa_digits(c['restarts'] or 0)}" + _stamp)
 
         if cmd in ("on", "restart") and self.activate_points_mode(uid):
             c = self.db.get(uid)
@@ -4345,7 +4521,8 @@ class Manager:
                       "deny", "reject", "order", "revenue", "shopplans",
                       "addplan", "editplan", "rmplan", "disc", "discs", "give",
                       "tk", "tr", "tclose", "packs", "addpack", "editpack",
-                      "rmpack", "gp", "acct", "pstats", "pset", "lim", "admin", "panel"}
+                      "rmpack", "gp", "acct", "pstats", "pset", "lim", "admin", "panel",
+                      "backup", "restore"}
         if cmd in ADMIN_ONLY:
             return await self.say(chat,
                 f"🔒 <b>{cmd}</b> فقط برای مدیر است.\n\n"
@@ -4360,6 +4537,12 @@ class Manager:
     async def admin_cmd(self, uid, chat, cmd, arg):
         p = arg.split()
 
+        if cmd in ("backup",):
+            ok, msg = await self.backup_once(force=True)
+            return await self.say(chat, ("✅ " if ok else "ℹ️ ") + msg)
+        if cmd in ("restore",):
+            ok, msg = await self.restore_from_backup(force=True)
+            return await self.say(chat, ("✅ " if ok else "❌ ") + msg)
         if cmd in ("admin", "panel"):
             sh = self.shop
             pend = len(sh.pending_orders()) if sh else 0
@@ -5259,6 +5442,628 @@ class Manager:
             await asyncio.sleep(3600)
 
     # ═══════════════════════════════════════════════
+    #  ورود ربات + پشتیبان خودکار (v0905-fix2)
+    # ═══════════════════════════════════════════════
+    async def login_bot(self, tries=5):
+        """ورود ربات با نشست ذخیره‌شده + تحمل FloodWait.
+
+        - نشست در BASE_DIR/manager_bot.string ذخیره می‌شود.
+        - در بوت بعدی فقط connect() + is_user_authorized() (بدون start با توکن).
+        - اگر FloodWait آمد، دقیقاً min(seconds,3600)+30 ثانیه می‌خوابد و دوباره تلاش می‌کند.
+        - بدون خوابیدن چکش نمی‌زند (برای خطاهای دیگر هم backoff دارد).
+        """
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+        try:
+            from telethon.errors import FloodWaitError as _FloodWait
+        except Exception:
+            _FloodWait = None
+
+        def _flood_seconds(exc):
+            try:
+                if _FloodWait is not None and isinstance(exc, _FloodWait):
+                    return int(getattr(exc, "seconds", 0) or 0)
+            except Exception:
+                pass
+            try:
+                if type(exc).__name__ == "FloodWaitError":
+                    return int(getattr(exc, "seconds", 0) or 0)
+            except Exception:
+                pass
+            return None
+
+        c = self.cfg
+        api_id = c["api_id"]
+        api_hash = c["api_hash"]
+        token = c["bot_token"]
+        last_err = None
+        tries = max(1, int(tries or 5))
+        class _RetryLoop(Exception):
+            pass
+
+        for attempt in range(1, tries + 1):
+            # ── 1) نشست ذخیره‌شده ──
+            saved = ""
+            try:
+                if os.path.isfile(BOT_SESSION_FILE):
+                    with open(BOT_SESSION_FILE, encoding="utf-8", errors="ignore") as f:
+                        saved = (f.read() or "").strip()
+            except Exception as e:
+                print(f"  ⚠️ خواندن نشست: {e}", flush=True)
+                saved = ""
+
+            use_token_path = True
+            if saved:
+                # 1-الف) ساخت آبجکت نشست — اگر خراب بود پاک کن و به توکن برو
+                try:
+                    _sess_obj = StringSession(saved)
+                except Exception as e:
+                    print(f"  ⚠️ نشست ذخیره‌شده خراب ({type(e).__name__}) — پاک و ورود با توکن", flush=True)
+                    try:
+                        if os.path.exists(BOT_SESSION_FILE):
+                            os.remove(BOT_SESSION_FILE)
+                    except Exception:
+                        pass
+                    _sess_obj = None
+                    # ادامه به مسیر توکن در همین تلاش (بدون خواب)
+                    use_token_path = True
+                else:
+                    # 1-ب) اتصال با نشست ذخیره‌شده (بدون start)
+                    client = None
+                    try:
+                        client = TelegramClient(_sess_obj, api_id, api_hash)
+                        await client.connect()
+                    except Exception as e:
+                        secs = _flood_seconds(e)
+                        if secs is not None:
+                            wait = min(max(0, secs), 3600) + 30
+                            print(f"  ⏳ FloodWait روی نشست ({secs}s) — خواب {wait}s (تلاش {attempt}/{tries})", flush=True)
+                            try:
+                                if client is not None:
+                                    try:
+                                        await client.disconnect()
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+                            await asyncio.sleep(wait)
+                            last_err = e
+                            continue
+                        # خطای اتصال (احتمالاً شبکه) — فایل را نگه دار، با backoff تلاش بعدی
+                        if attempt < tries:
+                            wait = min(10 * attempt, 60)
+                            print(f"  ⚠️ اتصال با نشست ناموفق ({type(e).__name__}: {e}) — تلاش {attempt}/{tries}، خواب {wait}s", flush=True)
+                            try:
+                                if client is not None:
+                                    try:
+                                        await client.disconnect()
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+                            await asyncio.sleep(wait)
+                            last_err = e
+                            continue
+                        print(f"  ⛔ اتصال ناموفق پس از {tries} تلاش: {type(e).__name__}: {e}", flush=True)
+                        raise
+                    # 1-ج) اعتبارسنجی
+                    try:
+                        try:
+                            ok = await client.is_user_authorized()
+                        except Exception as e:
+                            secs = _flood_seconds(e)
+                            if secs is not None:
+                                wait = min(max(0, secs), 3600) + 30
+                                print(f"  ⏳ FloodWait روی نشست ({secs}s) — خواب {wait}s (تلاش {attempt}/{tries})", flush=True)
+                                try:
+                                    await client.disconnect()
+                                except Exception:
+                                    pass
+                                await asyncio.sleep(wait)
+                                last_err = e
+                                # حلقه بعدی دوباره نشست را امتحان می‌کند
+                                raise _RetryLoop()
+                            raise
+                        if ok:
+                            self.bot = client
+                            print("  ✅ نشست ذخیره‌شده معتبر است (بدون ورود دوباره)", flush=True)
+                            return client
+                        # معتبر نیست → پاک و ورود با توکن در همین تلاش
+                        print("  ⚠️ نشست ذخیره‌شده معتبر نیست — پاک و ورود با توکن", flush=True)
+                        try:
+                            await client.disconnect()
+                        except Exception:
+                            pass
+                        try:
+                            if os.path.exists(BOT_SESSION_FILE):
+                                os.remove(BOT_SESSION_FILE)
+                        except Exception:
+                            pass
+                        use_token_path = True
+                    except _RetryLoop:
+                        continue
+                    except Exception as e:
+                        secs = _flood_seconds(e)
+                        if secs is not None:
+                            wait = min(max(0, secs), 3600) + 30
+                            print(f"  ⏳ FloodWait روی نشست ({secs}s) — خواب {wait}s (تلاش {attempt}/{tries})", flush=True)
+                            try:
+                                await client.disconnect()
+                            except Exception:
+                                pass
+                            await asyncio.sleep(wait)
+                            last_err = e
+                            continue
+                        # خطای اعتبارسنجی غیر Flood — اگر نشست خراب به نظر می‌رسد پاک کن
+                        # در غیر این صورت (شبکه) نگه دار و backoff
+                        _msg = f"{type(e).__name__}: {e}".lower()
+                        _looks_bad = any(k in _msg for k in ("auth", "session", "revoked", "deactivated", "banned", "unauthorized", "invalid", "corrupt"))
+                        if _looks_bad:
+                            print(f"  ⚠️ نشست ذخیره‌شده خراب ({type(e).__name__}) — پاک و ورود با توکن", flush=True)
+                            try:
+                                await client.disconnect()
+                            except Exception:
+                                pass
+                            try:
+                                if os.path.exists(BOT_SESSION_FILE):
+                                    os.remove(BOT_SESSION_FILE)
+                            except Exception:
+                                pass
+                            use_token_path = True
+                        else:
+                            if attempt < tries:
+                                wait = min(10 * attempt, 60)
+                                print(f"  ⚠️ اعتبارسنجی نشست ناموفق ({type(e).__name__}: {e}) — تلاش {attempt}/{tries}، خواب {wait}s", flush=True)
+                                try:
+                                    await client.disconnect()
+                                except Exception:
+                                    pass
+                                await asyncio.sleep(wait)
+                                last_err = e
+                                continue
+                            print(f"  ⛔ ورود ناموفق پس از {tries} تلاش: {type(e).__name__}: {e}", flush=True)
+                            raise
+            else:
+                use_token_path = True
+
+            if not use_token_path:
+                continue
+
+            # ── 2) ورود با توکن ──
+            client2 = None
+            try:
+                client2 = TelegramClient(StringSession(), api_id, api_hash)
+                await client2.start(bot_token=token)
+                # ذخیره نشست
+                try:
+                    s = StringSession.save(client2.session)
+                    if s:
+                        with open(BOT_SESSION_FILE, "w", encoding="utf-8") as f:
+                            f.write(s)
+                        try:
+                            os.chmod(BOT_SESSION_FILE, 0o600)
+                        except Exception:
+                            pass
+                        print(f"  💾 نشست ربات ذخیره شد ({len(s)} حرف)", flush=True)
+                except Exception as e:
+                    print(f"  ⚠️ ذخیره نشست: {type(e).__name__}: {e}", flush=True)
+                self.bot = client2
+                return client2
+            except Exception as e:
+                secs = _flood_seconds(e)
+                if secs is not None:
+                    wait = min(max(0, secs), 3600) + 30
+                    print(f"  ⏳ FloodWait روی ورود ({secs}s) — خواب {wait}s (تلاش {attempt}/{tries})", flush=True)
+                    try:
+                        if client2 is not None:
+                            try:
+                                await client2.disconnect()
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    await asyncio.sleep(wait)
+                    last_err = e
+                    continue
+                last_err = e
+                if attempt < tries:
+                    wait = min(10 * attempt, 60)
+                    print(f"  ⚠️ ورود ناموفق ({type(e).__name__}: {e}) — تلاش {attempt}/{tries}، خواب {wait}s", flush=True)
+                    try:
+                        if client2 is not None:
+                            try:
+                                await client2.disconnect()
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    await asyncio.sleep(wait)
+                    continue
+                print(f"  ⛔ ورود ناموفق پس از {tries} تلاش: {type(e).__name__}: {e}", flush=True)
+                raise
+
+        if last_err is not None:
+            raise last_err
+        raise RuntimeError("login failed")
+
+    # ---------- پشتیبان خودکار ----------
+    def _backup_target(self):
+        """مقصد پشتیبان: admin → چت مدیر، عدد → آیدی، وگرنه @username."""
+        raw = (os.environ.get("BACKUP_CHAT") or "").strip()
+        if not raw:
+            return None
+        if raw.lower() == "admin":
+            try:
+                aids = self.cfg.get("admin_ids") or []
+                if aids:
+                    return int(aids[0])
+            except Exception:
+                pass
+            return None
+        try:
+            if re.fullmatch(r"-?\d+", raw):
+                return int(raw)
+        except Exception:
+            pass
+        return raw
+
+    async def _backup_target_is_public(self, target):
+        """(عمومی_است, توضیح) — اگر کانال عمومی بود True."""
+        if isinstance(target, int):
+            return False, str(target)
+        try:
+            ent = await self.bot.get_entity(target)
+            username = getattr(ent, "username", None)
+            if username:
+                return True, f"@{username}"
+            if getattr(ent, "public", False):
+                return True, str(target)
+            return False, str(target)
+        except Exception as e:
+            print(f"  ⚠️ بررسی کانال پشتیبان: {type(e).__name__}", flush=True)
+            return False, str(target)
+
+    def _backup_fingerprint(self):
+        fps = []
+        for p in (DB_FILE, SHOP_DB, CONFIG_FILE, BOT_SESSION_FILE):
+            try:
+                if os.path.isfile(p):
+                    st = os.stat(p)
+                    fps.append((p, st.st_size, int(st.st_mtime)))
+                else:
+                    fps.append((p, None, None))
+            except Exception:
+                fps.append((p, None, None))
+        return tuple(fps)
+
+    async def backup_once(self, force=False):
+        """یک پشتیبان zip بفرست (فقط اگر اثرانگشت عوض شده، مگر force)."""
+        target = self._backup_target()
+        if not target:
+            return False, "BACKUP_CHAT تنظیم نشده"
+        if self.bot is None:
+            return False, "ربات وصل نیست"
+        try:
+            is_pub, info = await self._backup_target_is_public(target)
+            if is_pub:
+                msg = f"⚠️ پشتیبان شامل سشن تلگرام همهٔ مشتری‌هاست؛ کانال {info} عمومی است — ارسال رد شد."
+                print(f"  {msg}", flush=True)
+                try:
+                    for a in (self.cfg.get("admin_ids") or []):
+                        await self.say(a, msg)
+                except Exception:
+                    pass
+                return False, msg
+        except Exception as e:
+            print(f"  ⚠️ بررسی عمومی/خصوصی: {e}", flush=True)
+        fp = self._backup_fingerprint()
+        if not force and getattr(self, "_backup_fp", None) == fp:
+            return False, "بدون تغییر"
+        # چک‌پوینت WAL تا کپی db کامل باشد
+        try:
+            if getattr(self, "db", None) is not None:
+                try:
+                    self.db.c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                except Exception:
+                    pass
+                try:
+                    self.db.c.commit()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            if getattr(self, "shop", None) is not None:
+                try:
+                    self.shop.c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                except Exception:
+                    pass
+                try:
+                    self.shop.c.commit()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        tmpzip = os.path.join(tempfile.gettempdir(), f"jafj_backup_{int(time.time())}_{os.getpid()}.zip")
+        try:
+            with zipfile.ZipFile(tmpzip, "w", zipfile.ZIP_DEFLATED) as z:
+                for src in (DB_FILE, SHOP_DB, CONFIG_FILE, BOT_SESSION_FILE):
+                    if os.path.isfile(src):
+                        z.write(src, arcname=os.path.basename(src))
+                    else:
+                        print(f"  ⚠️ پشتیبان: {src} نیست — رد شد", flush=True)
+            try:
+                cnt = self.db.x("SELECT COUNT(*) c FROM clients", (), "one")
+                n = cnt["c"] if cnt else 0
+            except Exception:
+                n = "?"
+            caption = f"{BACKUP_TAG} {datetime.now():%Y-%m-%d %H:%M} clients={n} build={BUILD_VERSION}"
+            await self.bot.send_file(target, tmpzip, caption=caption)
+            self._backup_fp = fp
+            try:
+                sz = os.path.getsize(tmpzip)
+            except Exception:
+                sz = 0
+            print(f"  📦 پشتیبان فرستاده شد به {target} ({sz} بایت)", flush=True)
+            try:
+                os.remove(tmpzip)
+            except Exception:
+                pass
+            return True, f"پشتیبان فرستاده شد ({n} مشتری)"
+        except Exception as e:
+            try:
+                if os.path.exists(tmpzip):
+                    os.remove(tmpzip)
+            except Exception:
+                pass
+            print(f"  ⚠️ پشتیبان: {type(e).__name__}: {e}", flush=True)
+            return False, f"{type(e).__name__}: {e}"
+
+    async def backup_loop(self):
+        await asyncio.sleep(10)
+        while True:
+            try:
+                interval = backup_interval()
+                try:
+                    ok, msg = await self.backup_once(force=False)
+                    if ok:
+                        print(f"  📦 پشتیبان خودکار: {msg}", flush=True)
+                except Exception as e:
+                    print(f"  ⚠️ پشتیبان خودکار: {type(e).__name__}: {e}", flush=True)
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"backup_loop: {e}", flush=True)
+                await asyncio.sleep(120)
+
+    async def restore_from_backup(self, force=False):
+        """بازیابی از آخرین پشتیبان تلگرام. (موفق, پیام)"""
+        target = self._backup_target()
+        if not target:
+            return False, "BACKUP_CHAT تنظیم نشده"
+        if self.bot is None:
+            return False, "ربات وصل نیست"
+        try:
+            cnt = self.db.x("SELECT COUNT(*) c FROM clients", (), "one")
+            n0 = cnt["c"] if cnt else 0
+        except Exception:
+            n0 = 0
+        if n0 != 0 and not force:
+            return False, f"دیتابیس خالی نیست ({n0} مشتری)"
+        last = None
+        try:
+            async for msg in self.bot.iter_messages(target, limit=50):
+                try:
+                    txt = getattr(msg, "text", "") or ""
+                except Exception:
+                    txt = ""
+                try:
+                    cap = getattr(msg, "caption", "") or ""
+                except Exception:
+                    cap = ""
+                try:
+                    combined = f"{txt} {cap}"
+                    if BACKUP_TAG in combined:
+                        last = msg
+                        break
+                except Exception:
+                    continue
+        except Exception as e:
+            return False, f"خطا در جستجوی پشتیبان: {type(e).__name__}: {e}"
+        if last is None:
+            return False, "پشتیبانی پیدا نشد"
+        tmpzip = os.path.join(tempfile.gettempdir(), f"jafj_restore_{int(time.time())}_{os.getpid()}.zip")
+        try:
+            downloaded = None
+            try:
+                downloaded = await self.bot.download_media(last, file=tmpzip)
+            except TypeError:
+                try:
+                    downloaded = await self.bot.download_media(last)
+                    if downloaded and str(downloaded) != tmpzip and os.path.isfile(str(downloaded)):
+                        try:
+                            shutil.copy2(str(downloaded), tmpzip)
+                        except Exception:
+                            tmpzip = str(downloaded)
+                except Exception as e:
+                    return False, f"دانلود نشد: {type(e).__name__}: {e}"
+            except AttributeError:
+                try:
+                    dl = getattr(last, "download_media", None)
+                    if dl is None:
+                        return False, "دانلود پشتیبانی نمی‌شود"
+                    downloaded = await dl(file=tmpzip)
+                except Exception as e:
+                    return False, f"دانلود نشد: {type(e).__name__}: {e}"
+            except Exception as e:
+                return False, f"دانلود نشد: {type(e).__name__}: {e}"
+            zip_path = None
+            try:
+                if downloaded and isinstance(downloaded, str) and os.path.isfile(downloaded):
+                    zip_path = downloaded
+                elif os.path.isfile(tmpzip):
+                    zip_path = tmpzip
+                else:
+                    return False, "فایل پشتیبان دانلود نشد"
+            except Exception:
+                if os.path.isfile(tmpzip):
+                    zip_path = tmpzip
+                else:
+                    return False, "فایل پشتیبان دانلود نشد"
+            # ── بستن اتصال‌ها قبل از نوشتن (وگرنه SQLite خالی را برمی‌گرداند) ──
+            try:
+                if hasattr(self.db, "close"):
+                    self.db.close()
+                else:
+                    try:
+                        self.db.c.commit()
+                    except Exception:
+                        pass
+                    try:
+                        self.db.c.close()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            try:
+                if getattr(self, "shop", None) is not None:
+                    if hasattr(self.shop, "close"):
+                        self.shop.close()
+                    else:
+                        try:
+                            self.shop.c.commit()
+                        except Exception:
+                            pass
+                        try:
+                            self.shop.c.close()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            for suffix in ("-wal", "-shm", "-journal"):
+                for base in (DB_FILE, SHOP_DB):
+                    try:
+                        p = base + suffix
+                        if os.path.exists(p):
+                            os.remove(p)
+                    except Exception:
+                        pass
+            # ── استخراج ──
+            try:
+                with zipfile.ZipFile(zip_path, "r") as z:
+                    names = z.namelist()
+                    for arc in names:
+                        bn = os.path.basename(arc)
+                        if bn in ("manager.db", "shop.db", "manager_config.json", "manager_bot.string"):
+                            dest = os.path.join(BASE_DIR, bn)
+                            try:
+                                data = z.read(arc)
+                            except Exception as e:
+                                print(f"  ⚠️ خواندن {arc} از پشتیبان: {e}", flush=True)
+                                continue
+                            try:
+                                tmp = dest + ".restore_tmp"
+                                with open(tmp, "wb") as f:
+                                    f.write(data)
+                                os.replace(tmp, dest)
+                                print(f"  ♻️ بازیابی {bn} ({len(data)} بایت)", flush=True)
+                            except Exception as e:
+                                print(f"  ⚠️ نوشتن {bn}: {e}", flush=True)
+                        else:
+                            print(f"  ⚠️ فایل ناشناخته در پشتیبان: {arc} — رد شد", flush=True)
+            except Exception as e:
+                try:
+                    self.db = DB()
+                    self.sup.db = self.db
+                except Exception:
+                    pass
+                try:
+                    self.shop = Shop()
+                except Exception:
+                    pass
+                return False, f"خطا در استخراج: {type(e).__name__}: {e}"
+            # ── بازسازی DB و Shop ──
+            try:
+                self.db = DB()
+                self.sup.db = self.db
+                self.shop = Shop()
+            except Exception as e:
+                return False, f"خطا در بازسازی دیتابیس: {e}"
+            try:
+                cnt2 = self.db.x("SELECT COUNT(*) c FROM clients", (), "one")
+                n2 = cnt2["c"] if cnt2 else 0
+            except Exception:
+                n2 = -1
+            # بازسازی سشن‌های گمشده تا بوت بعد از Redeploy کار کند
+            regen = 0
+            try:
+                for cc in self.db.runnable():
+                    _uid = cc["uid"]
+                    _folder = self.sup.folder(_uid)
+                    _sess_path = os.path.join(_folder, "jafj.session")
+                    if not os.path.exists(_sess_path) and cc.get("session"):
+                        try:
+                            try:
+                                _plan = self.effective_plan(_uid)
+                            except Exception:
+                                _plan = None
+                            _mx = 1
+                            try:
+                                if _plan:
+                                    _mx = max(1, int(_plan.get("max_accounts", 1) or 1))
+                            except Exception:
+                                pass
+                            self.sup.prepare(_uid, cc["session"], cc.get("phone") or "", _mx, _plan)
+                            regen += 1
+                        except Exception as e:
+                            print(f"  ⚠️ بازسازی سشن {_uid}: {e}", flush=True)
+            except Exception as e:
+                print(f"  ⚠️ بازسازی سشن‌ها: {e}", flush=True)
+            try:
+                if zip_path and zip_path.startswith(tempfile.gettempdir()) and os.path.exists(zip_path):
+                    os.remove(zip_path)
+            except Exception:
+                pass
+            try:
+                self._backup_fp = self._backup_fingerprint()
+            except Exception:
+                pass
+            return True, f"بازیابی شد: {n2} مشتری" + (f" + {regen} سشن بازسازی" if regen else "")
+        except Exception as e:
+            try:
+                try:
+                    self.db.x("SELECT 1", (), "one")
+                except Exception:
+                    try:
+                        self.db = DB()
+                        self.sup.db = self.db
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            try:
+                if getattr(self, "shop", None) is not None:
+                    try:
+                        self.shop.x("SELECT 1", (), "one")
+                    except Exception:
+                        try:
+                            self.shop = Shop()
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        self.shop = Shop()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            import traceback
+            traceback.print_exc()
+            return False, f"خطا: {type(e).__name__}: {e}"
+
+
+    # ═══════════════════════════════════════════════
     #  اجرا
     # ═══════════════════════════════════════════════
     async def run(self):
@@ -5308,22 +6113,15 @@ class Manager:
             if "3.0" not in ver:
                 print("  ⛔ این 95.py پنل جدید نیست. فایل 95.py همین چت را آپلود کن.")
 
-        # ربات به فایل نشست نیاز ندارد — با توکن هر بار تازه وصل می‌شود.
-        # این کار مشکل «database is locked» را کاملاً حذف می‌کند.
-        from telethon.sessions import StringSession
-        self.bot = TelegramClient(StringSession(), c["api_id"], c["api_hash"])
+        # ورود با نشست ذخیره‌شده + تحمل FloodWait (بدون چرخه کرش)
         try:
-            await self.bot.start(bot_token=c["bot_token"])
-        except sqlite3.OperationalError as e:
-            print(f"\n⛔ خطای دیتابیس: {e}")
-            print("   pkill -f manager_82.py   سپس دوباره اجرا کن\n")
-            return 1
+            await self.login_bot(tries=5)
         except Exception as e:
-            print(f"\n⛔ اتصال ناموفق: {type(e).__name__}: {e}")
-            print("   توکن یا اینترنت را چک کن.\n")
+            print(f"\n⛔ ورود ناموفق پس از تلاش‌ها: {type(e).__name__}: {e}")
+            print("   توکن/api یا محدودیت FloodWait را چک کن.\n")
             return 1
 
-        # فایل نشست قدیمی اگر مانده، پاکش کن
+        # فایل نشست قدیمی اگر مانده، پاکش کن (نسخه .string جایگزین شده)
         for junk in ("manager_bot.session", "manager_bot.session-journal"):
             try:
                 if os.path.exists(junk):
@@ -5341,6 +6139,23 @@ class Manager:
             print("     اولین نفر مدیر می‌شود.")
         print(f"  سقف: {c['max_clients']} مشتری")
 
+        # ── بازیابی خودکار از پشتیبان تلگرام (اگر دیتابیس خالی است) ──
+        try:
+            if (os.environ.get("BACKUP_CHAT") or "").strip():
+                try:
+                    _cnt0 = self.db.x("SELECT COUNT(*) c FROM clients", (), "one")
+                    _n0 = _cnt0["c"] if _cnt0 else 0
+                except Exception:
+                    _n0 = 0
+                if _n0 == 0:
+                    print("  🔍 دیتابیس خالی است — جستجوی پشتیبان تلگرام…", flush=True)
+                    _ok, _msg = await self.restore_from_backup(force=False)
+                    print(f"  {'✅' if _ok else 'ℹ️'} بازیابی: {_msg}", flush=True)
+                else:
+                    print(f"  ℹ️ {_n0} مشتری در دیتابیس — نیازی به بازیابی نیست", flush=True)
+        except Exception as e:
+            print(f"  ⚠️ بازیابی خودکار: {type(e).__name__}: {e}", flush=True)
+
         self.boot_at = now()
         n = self.sup.boot_all()
         print(f"  {n} سرویس فعال بالا آمد")
@@ -5350,6 +6165,13 @@ class Manager:
         asyncio.create_task(self.reminder_loop())
         asyncio.create_task(self.points_loop())
         asyncio.create_task(self.trial_loop())
+        # پشتیبان خودکار روی تلگرام
+        try:
+            if (os.environ.get("BACKUP_CHAT") or "").strip():
+                asyncio.create_task(self.backup_loop())
+                print(f"  📦 پشتیبان خودکار فعال: هر {backup_interval()}s به {os.environ.get('BACKUP_CHAT')}", flush=True)
+        except Exception as e:
+            print(f"  ⚠️ پشتیبان خودکار: {e}", flush=True)
 
         @self.bot.on(events.NewMessage(incoming=True))
         async def handler(ev):
@@ -5808,6 +6630,14 @@ def main():
     else:
         print(f"⚠️ فایل سلف پیدا نشد — مسیرهای جستجو: "
               f"{', '.join(selfbot_search_dirs())}", flush=True)
+    try:
+        maybe_migrate_to_data_dir()
+    except Exception:
+        pass
+    try:
+        print(f"  {build_stamp()}", flush=True)
+    except Exception:
+        pass
     m = Manager()
     try:
         return asyncio.run(m.run())
