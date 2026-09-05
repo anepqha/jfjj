@@ -923,12 +923,20 @@ def purge_old_selfbots(root="."):
 
 
 def find_selfbot():
-    """سلف تو 95.py هست - باگ 77/78 پاک شد."""
+    """سلف تو 95.py هست - باگ 77/78 پاک شد.
+    همیشه مسیر کامل (absolute) برمی‌گرداند تا از هر cwd کار کند."""
+    # اول کنار همین اسکریپت بگرد
+    script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+    for cand in ("95.py", "95"):
+        p = os.path.join(script_dir, cand)
+        if os.path.isfile(p):
+            return p
+    # بعد cwd فعلی
     for cand in ("95.py", "95"):
         if os.path.isfile(cand):
-            return cand
-    return "95.py"
-    return "95.py"
+            return os.path.abspath(cand)
+    # هیچ‌کدام نبود — مسیر پیش‌فرض کنار اسکریپت
+    return os.path.join(script_dir, "95.py")
 
 
 SELFBOT = find_selfbot()
@@ -964,7 +972,7 @@ DEFAULTS = {
     "referral_points": 2,   # پاداش هر دعوت معتبر پس از تأیید شماره ایران
     "remind_days": 3,       # چند روز قبل از انقضا یادآوری
     # ── سیستم امتیاز (خریدنی) ──
-    "points_on": False,  # فیکس 30 دقیقه آف نشه - امتیاز خاموش (برای 1-5 ممبر)
+    "points_on": True,  # فیکس: امتیاز همیشه روشن
     "cost_per_hour": 1,      # هر ساعت کارکرد چند امتیاز  (2 ساعت = 2 امتیاز)
     "min_points": 20,        # حداقل امتیاز لازم برای فعال‌سازی
     "start_fee": 20,         # هزینه هر بار روشن کردن دستی
@@ -1698,19 +1706,18 @@ def main_menu(is_admin=False, shop_on=True, points_on=True,
     rows.append([B("🚀 راه‌اندازی سلف روی اکانتم", "s:setup", "primary")])
     # دکمه تست رایگان همیشه برای تمام کاربران نمایش داده می‌شود
     rows.append([B("🎁 تست رایگان ۳۰ دقیقه‌ای", "m:trial", "success")])
-    # دو راه خرید، کنار هم
+    # دو راه خرید، کنار هم — دکمه‌های خرید امتیاز همیشه نمایش داده می‌شوند
     if shop_on:
-        buy = [B("💎 اشتراک ماهانه", "m:plans", "primary")]
-        if points_on:
-            buy.append(B("🎯 خرید امتیاز", "m:packs", "success"))
+        buy = [B("💎 اشتراک ماهانه", "m:plans", "primary"),
+               B("🎯 خرید امتیاز", "m:packs", "success")]
         rows.append(buy)
     # سرویس: سبز وقتی روشن است، قرمز وقتی خاموش و آماده‌ی روشن شدن
     svc_style = "success" if running else ("danger" if has_session else "primary")
     rows.append([B("⚙️ سرویس من" + ("  🟢" if running else "  ⚪"), "m:svc",
                    svc_style),
                  B("📊 وضعیت", "m:status", svc_style)])
-    if points_on:
-        rows.append([B("🎯 امتیاز من", "m:pts", "success")])
+    # دکمه امتیاز من همیشه نمایش داده می‌شود
+    rows.append([B("🎯 امتیاز من", "m:pts", "success")])
     if shop_on:
         rows.append([B("💳 کیف پول", "m:wallet", "primary"),
                      B("🎁 زیرمجموعه", "m:ref", "success")])
