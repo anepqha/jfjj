@@ -776,6 +776,13 @@ CLIENTS_DIR = os.path.join(BASE_DIR, "clients")
 
 # سلف فقط 95.py است - 77/78 پاک میشوند
 SELF_NAMES = ("95.py",)
+# فقط «نام» فایل — برای ساختن مسیر داخل پوشه‌ی مشتری. هیچ‌وقت SELFBOT کامل
+# (مسیر absolute) را داخل os.path.join با پوشه نده، چون join مسیر اول را دور
+# می‌ریزد و فایل سلفِ مشترک با فایل مشتری یکی می‌شود.
+SELF_NAME = SELF_NAMES[0]
+# نسخه‌ی مرجع سلف بیرون از پوشه‌ی اجرا (توی ایمیج داکر ساخته می‌شود).
+# اگر 95.py کنار manager پاک یا خراب شد، سلف از همین نسخه بازسازی می‌شود.
+SELFBOT_REF = os.environ.get("JAFJ_SELFBOT_REF", "/opt/jafj/95.py")
 JUNK_SELF = (
     "jafj_self.py", "jafj_self", "self.py", "سلف.py",
     "جفج سلف.py", "جفج_سلف.py", "jafj_manager.py",
@@ -922,21 +929,92 @@ def purge_old_selfbots(root="."):
     return gone
 
 
+def selfbot_search_dirs():
+    """پوشه‌هایی که 95.py می‌تواند داخلشان باشد (بدون تکرار)."""
+    try:
+        script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+    except Exception:
+        script_dir = ""
+    out, seen = [], set()
+    for d in (script_dir, os.getcwd(), os.path.abspath(BASE_DIR), "/app"):
+        if d and d not in seen and os.path.isdir(d):
+            seen.add(d)
+            out.append(d)
+    if not out:
+        out = [os.path.abspath(BASE_DIR)]
+    return out
+
+
+def _restore_selfbot(dst):
+    """95.py را از نسخه مرجع ایمیج بازمی‌گرداند. True اگر موفق بود."""
+    ref = SELFBOT_REF
+    if not ref or not os.path.isfile(ref):
+        return False
+    try:
+        with open(ref, "rb") as f:
+            data = f.read()
+        if not data or os.path.abspath(ref) == os.path.abspath(dst):
+            return False
+        # symlink حلقه‌ای/خراب قبلی مانع نوشتن نمی‌شد، اول پاکش کن
+        if os.path.lexists(dst) and not os.path.isfile(dst):
+            try:
+                os.remove(dst)
+            except Exception:
+                return False
+        with open(dst, "wb") as f:
+            f.write(data)
+        print(f"  ♻️ فایل سلف از نسخه مرجع بازسازی شد: {dst}", flush=True)
+        return True
+    except Exception as e:
+        print("restore selfbot:", e, flush=True)
+        return False
+
+
+def ensure_selfbot_ref(src=None):
+    """یک نسخه سالم از سلف در مسیر مرجع نگه می‌دارد تا اگر نسخه‌ی اجرا
+    پاک یا خراب شد، سلف قابل بازسازی باشد (فایل ایمیج /opt/jafj)."""
+    try:
+        src = os.path.abspath(src or SELFBOT)
+        ref = os.path.abspath(SELFBOT_REF)
+        if src == ref or not os.path.isfile(src):
+            return False
+        if os.path.isfile(ref) and os.path.getsize(ref) == os.path.getsize(src):
+            return False
+        d = os.path.dirname(ref)
+        if not os.path.isdir(d):
+            os.makedirs(d, exist_ok=True)
+        with open(src, "rb") as f:
+            data = f.read()
+        tmp = ref + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, ref)
+        return True
+    except Exception:
+        return False      # /opt روی بعضی سیستم‌ها نوشتنی نیست — اشکالی ندارد
+
+
 def find_selfbot():
-    """سلف تو 95.py هست - باگ 77/78 پاک شد.
-    همیشه مسیر کامل (absolute) برمی‌گرداند تا از هر cwd کار کند."""
-    # اول کنار همین اسکریپت بگرد
-    script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-    for cand in ("95.py", "95"):
-        p = os.path.join(script_dir, cand)
-        if os.path.isfile(p):
-            return p
-    # بعد cwd فعلی
-    for cand in ("95.py", "95"):
-        if os.path.isfile(cand):
-            return os.path.abspath(cand)
-    # هیچ‌کدام نبود — مسیر پیش‌فرض کنار اسکریپت
-    return os.path.join(script_dir, "95.py")
+    """سلف فقط 95.py است؛ همیشه مسیر کامل (absolute) برمی‌گرداند.
+
+    دو باگ قدیمی اینجا رفع شد:
+      ۱) مسیر نسبی برمی‌گشت، پس با هر cwd دیگری «95.py پیدا نشد» می‌داد.
+      ۲) فایل پاک‌شده یا symlink حلقه‌ای به‌جای 95.py، مرور بعدی را هم
+         می‌سوزاند؛ حالا از نسخه مرجع (/opt/jafj) بازسازی می‌شود.
+    """
+    for d in selfbot_search_dirs():
+        for cand in SELF_NAMES + ("95",):
+            p = os.path.join(d, cand)
+            if os.path.isfile(p):
+                return p
+    # هیچ نسخه سالمی نبود → از نسخه مرجع بازسازی کن
+    for d in selfbot_search_dirs():
+        for cand in SELF_NAMES:
+            p = os.path.join(d, cand)
+            if _restore_selfbot(p):
+                return p
+    # هیچ‌کدام نبود — مسیر پیش‌فرض کنار اسکریپت (پیام خطا دقیق بماند)
+    return os.path.join(selfbot_search_dirs()[0], SELF_NAME)
 
 
 SELFBOT = find_selfbot()
@@ -946,7 +1024,7 @@ BOT_TOKEN = "8789173370:AAFldI-budd0hsXlVRnOlLndl3e5wOeb5aU"
 API_ID = 28039994
 API_HASH = "00877cdcd706564a4de6abf7f7d64349"
 ADMIN_IDS = [8287266200]
-BUILD_TAG = "JAFJ_MANAGER_69_70_EN_2026_08_28"
+BUILD_TAG = "JAFJ_MANAGER_82_SELFPATH_FIX_2026_09_05"
 
 DEFAULTS = {
     "bot_token": BOT_TOKEN,
@@ -1391,44 +1469,69 @@ class Supervisor:
         self.write_ai(uid)
         self.write_defaults(uid, max_accounts)
         self.write_limits(uid, plan, points_mode=plan is None)
-        # کپی سلف در پوشه‌ی مشتری اگر نبود
-        src = os.path.abspath(SELFBOT)
-        dst = os.path.join(self.folder(uid), SELFBOT)
-        # همیشه نسخه جدید سلف را به مشتری منتقل کن؛ نسخه قدیمی باقی نماند.
-        if os.path.exists(src):
-            try:
-                if os.path.lexists(dst):
-                    os.remove(dst)
-                try:
-                    os.symlink(src, dst)
-                except Exception:
-                    import shutil
-                    shutil.copy2(src, dst)
-            except Exception as e:
-                print("sync selfbot:", e)
+        # کپی سلف در پوشه‌ی مشتری — همیشه نسخه جدید، نسخه قدیمی نمی‌ماند
+        ok, err = self.link_selfbot(uid)
+        if not ok:
+            print("sync selfbot:", err)
 
     # ---------- همگام‌سازی و کنترل ----------
-    def sync_selfbot(self, uid):
-        """نسخه فعلی 95.py را روی همه نام‌های قدیمی پوشه مشتری می‌نویسد."""
+    def link_selfbot(self, uid):
+        """فایل سلف را داخل پوشه مشتری می‌گذارد (symlink، وگرنه کپی).
+
+        نکته حیاتی: مقصد همیشه با SELF_NAME ساخته می‌شود. SELFBOT مسیر
+        absolute است و os.path.join(folder, "/app/95.py") پوشه مشتری را
+        دور می‌ریزد؛ نتیجه‌اش این بود که فایل مشترک /app/95.py پاک و به
+        symlink حلقه‌ای تبدیل می‌شد و بعد از آن هر sync با «فایل 95.py
+        پیدا نشد» می‌ترکید.
+        """
         src = os.path.abspath(SELFBOT)
+        dst = os.path.join(self.folder(uid), SELF_NAME)
         if not os.path.isfile(src):
-            return False, f"فایل {SELFBOT} پیدا نشد"
-        folder = self.folder(uid)
+            _restore_selfbot(src)          # نسخه مرجع ایمیج، بدون ری‌استارت
+        if not os.path.isfile(src):
+            return False, (f"فایل {src} پیدا نشد (cwd={os.getcwd()}، "
+                           f"مرجع={SELFBOT_REF})")
+        if os.path.abspath(dst) == src:          # پوشه مشتری = پوشه سلف
+            return True, ""
         try:
-            data = open(src, "rb").read()
-            for junk in JUNK_SELF:
-                p = os.path.join(folder, junk)
-                if os.path.lexists(p):
-                    try:
-                        os.remove(p)
-                    except Exception:
-                        pass
-            dst = os.path.join(folder, SELFBOT)
-            with open(dst, "wb") as f:
-                f.write(data)
+            if os.path.lexists(dst):
+                os.remove(dst)
+            try:
+                os.symlink(src, dst)
+            except Exception:
+                import shutil
+                shutil.copy2(src, dst)
+            ensure_selfbot_ref(src)
             return True, ""
         except Exception as e:
             return False, str(e)
+
+    def sync_selfbot(self, uid):
+        """نسخه فعلی 95.py را داخل پوشه مشتری می‌نویسد و نام‌های قدیمی را پاک می‌کند."""
+        folder = self.folder(uid)
+        for junk in JUNK_SELF:
+            p = os.path.join(folder, junk)
+            if os.path.lexists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+        ok, err = self.link_selfbot(uid)
+        if ok:
+            src = os.path.abspath(SELFBOT)
+            dst = os.path.join(folder, SELF_NAME)
+            # اگر لینک/کپی از کار افتاد، لااقل محتوا را مستقیم بنویس
+            if not (os.path.isfile(dst) and os.path.getsize(dst) == os.path.getsize(src)):
+                try:
+                    with open(src, "rb") as f:
+                        data = f.read()
+                    if os.path.abspath(dst) != src:
+                        with open(dst, "wb") as f:
+                            f.write(data)
+                except Exception as e:
+                    return False, str(e)
+            return True, ""
+        return False, err
 
     def is_running(self, uid):
         p = self.procs.get(uid)
@@ -4806,8 +4909,10 @@ class Manager:
 
             # فایل‌ها
             found = os.path.isfile(SELFBOT)
-            line(found, "فایل سلف (95.py)",
-                 "" if found else "فقط 95.py را کنار manager_82.py بگذار — jafj_self لازم نیست")
+            line(found, f"فایل سلف ({SELF_NAME})",
+                 "" if found else
+                 f"{SELFBOT} نیست — فایل {SELF_NAME} باید کنار manager_82.py "
+                 f"در ایمیج باشد (نسخه مرجع: {SELFBOT_REF})")
             line(True, "موتور فروشگاه (داخلی)")
             try:
                 import telethon
@@ -4888,7 +4993,7 @@ class Manager:
             miss = []
             for c in runnable[:50]:
                 f = self.sup.folder(c["uid"])
-                for need in ("jafj.session", "jafj_creds.json", SELFBOT):
+                for need in ("jafj.session", "jafj_creds.json", SELF_NAME):
                     if not os.path.exists(os.path.join(f, need)):
                         miss.append(f"{c['uid']}: {need}")
             if miss:
@@ -4925,7 +5030,7 @@ class Manager:
                         fixed.append(f"🔧 {uid2} فایل‌ها بازسازی شد")
                     except Exception as e:
                         fixed.append(f"❌ {uid2}: {e}")
-                if not os.path.exists(os.path.join(f, SELFBOT)):
+                if not os.path.exists(os.path.join(f, SELF_NAME)):
                     try:
                         self.sup.prepare(uid2, c["session"], c["phone"] or "")
                     except Exception as e:
@@ -5191,10 +5296,13 @@ class Manager:
 
         global SELFBOT
         SELFBOT = find_selfbot()
-        if not os.path.exists(SELFBOT):
-            print(f"\n⚠️ فایل سلف پیدا نشد.")
-            print(f"   فقط 95.py را کنار manager_82.py بگذار. jafj_self لازم نیست.\n")
+        if not os.path.isfile(SELFBOT):
+            print(f"\n⚠️ فایل سلف پیدا نشد: {SELFBOT}")
+            print(f"   نسخه مرجع: {SELFBOT_REF}"
+                  + (" (سالم است)" if os.path.isfile(SELFBOT_REF) else " (نیست)"))
+            print("   فقط 95.py را کنار manager_82.py بگذار. jafj_self لازم نیست.\n")
         else:
+            ensure_selfbot_ref(SELFBOT)
             ver = selfbot_version(SELFBOT)
             print(f"  سلف: {SELFBOT}  VERSION={ver or '?'}")
             if "3.0" not in ver:
@@ -5695,6 +5803,11 @@ def main():
 
     global SELFBOT
     SELFBOT = find_selfbot()
+    if os.path.isfile(SELFBOT):
+        ensure_selfbot_ref(SELFBOT)     # نسخه مرجع برای بازسازی در بوت بعدی
+    else:
+        print(f"⚠️ فایل سلف پیدا نشد — مسیرهای جستجو: "
+              f"{', '.join(selfbot_search_dirs())}", flush=True)
     m = Manager()
     try:
         return asyncio.run(m.run())
