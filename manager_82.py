@@ -1148,8 +1148,8 @@ BOT_TOKEN = "8789173370:AAFldI-budd0hsXlVRnOlLndl3e5wOeb5aU"
 API_ID = 28039994
 API_HASH = "00877cdcd706564a4de6abf7f7d64349"
 ADMIN_IDS = [8287266200]
-BUILD_VERSION = "v0905-fix2"
-BUILD_TAG = "JAFJ_MANAGER_82_v0905-fix2_2026_09_05"
+BUILD_VERSION = "v0906-railway"
+BUILD_TAG = "JAFJ_MANAGER_82_v0906-railway_2026_09_06"
 
 # ── نشست ذخیره‌شده ربات مدیر (جلوگیری از ImportBotAuthorization در هر بوت) ──
 BOT_SESSION_FILE = os.path.join(BASE_DIR, "manager_bot.string")
@@ -1868,7 +1868,7 @@ class Supervisor:
         ok_sync, sync_err = self.sync_selfbot(uid)
         if not ok_sync:
             self.last_failure[uid] = "manager"
-            return False, "به‌روزرسانی فایل سلف نشد: " + sync_err
+            return False, "به‌روزرسانی فایل سلف نشد: " + sync_err + " · " + build_stamp()
         logf = open(os.path.join(folder, "run.log"), "a", encoding="utf-8")
         logf.write(f"\n===== start {datetime.now():%Y-%m-%d %H:%M:%S} =====\n")
         logf.flush()
@@ -2222,6 +2222,7 @@ class Manager:
         self.fsm = {}            # uid -> {"step":..., "client":..., "phone":...}
         self.bot = None
         self._join_ok = {}       # uid -> expire ts cache
+        self._say_last = {}      # کش ضد تکرار say (روی self نه روی bound method)
 
     # ---------- کمکی ----------
     def is_admin(self, uid):
@@ -2240,15 +2241,16 @@ class Manager:
         # ── ضد تکرار: اگه همین متن اخیراً به همین کاربر فرستاده شده، رد کن ──
         msg_key = f"say:{uid}:{hash(text[:200])}"
         now_t = time.time()
-        if not hasattr(self.say, "_last"):
-            self.say._last = {}
-        last_send = self.say._last.get(msg_key, 0)
+        last = getattr(self, "_say_last", None)
+        if last is None:
+            last = self._say_last = {}
+        last_send = last.get(msg_key, 0)
         if now_t - last_send < 2:
             return True
-        self.say._last[msg_key] = now_t
-        if len(self.say._last) > 500:
+        last[msg_key] = now_t
+        if len(last) > 500:
             cutoff = now_t - 30
-            self.say._last = {k: v for k, v in self.say._last.items() if v > cutoff}
+            self._say_last = {k: v for k, v in last.items() if v > cutoff}
         try:
             r = await self.bot.send_message(uid, text, parse_mode="html",
                                             link_preview=False, buttons=buttons)
