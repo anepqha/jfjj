@@ -1,7 +1,7 @@
 {
   "build": { "builder": "dockerfile" },
   "deploy": {
-    "startCommand": "python manager_82.py",
+    "startCommand": "sh /opt/jafj/railway-start.sh",
     "restartPolicyType": "onFailure"
   }
 }
