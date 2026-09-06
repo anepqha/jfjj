@@ -892,6 +892,25 @@ def pid_alive(pid):
         return True
 
 
+def pid_is_manager(pid):
+    """آیا این PID واقعاً یک manager_82 در حال اجراست؟
+
+    True/False = مطمئنیم، None = نمی‌شود فهمید (غیر لینوکس).
+
+    چرا لازم است: bot.lock کنار داده‌ها می‌ماند و روی Railway یعنی داخل
+    Volume. بعد از هر دیپلوی، PID قدیمیِ داخل فایل به PID زنده‌ی دیگری در
+    کانتینر جدید می‌خورد (پروسه‌ی سلف، خود shell و…)؛ نتیجه‌اش این بود که
+    manager با «یک نسخه در حال اجراست» exit 1 می‌کرد و Railway هم پشت‌سرهم
+    ری‌استارت می‌شد — همان کرش‌لوپ.
+    """
+    try:
+        with open(f"/proc/{int(pid)}/cmdline", "rb") as f:
+            cmd = f.read().replace(b"\x00", b" ").decode("utf-8", "ignore")
+    except Exception:
+        return None
+    return "manager_82" in cmd
+
+
 def acquire_lock():
     """جلوگیری از اجرای همزمان دو نسخه. (موفق, پیام)"""
     try:
@@ -900,7 +919,10 @@ def acquire_lock():
                 old = int(open(LOCK_FILE).read().strip() or 0)
             except Exception:
                 old = 0
-            if old and old != os.getpid() and pid_alive(old):
+            # قفل فقط وقتی معتبر است که آن PID هم زنده باشد و هم واقعاً
+            # manager باشد؛ وگرنه قفلِ مانده از دیپلوی قبلی است.
+            if (old and old != os.getpid() and pid_alive(old)
+                    and pid_is_manager(old) is not False):
                 return False, old
             os.remove(LOCK_FILE)          # قفل مرده
         with open(LOCK_FILE, "w") as f:
@@ -996,8 +1018,16 @@ def ensure_selfbot_ref(src=None):
         ref = os.path.abspath(SELFBOT_REF)
         if src == ref or not os.path.isfile(src):
             return False
-        if os.path.isfile(ref) and os.path.getsize(ref) == os.path.getsize(src):
-            return False
+        if os.path.isfile(ref):
+            if os.path.getsize(ref) == os.path.getsize(src):
+                return False
+            # نسخه‌ی مرجعِ تازه‌تر هرگز با فایل قدیمیِ پوشه‌ی اجرا بازنویسی
+            # نمی‌شود؛ وگرنه یک Volume کهنه، تنها نسخه‌ی سالم را هم خراب می‌کند.
+            try:
+                if os.path.getmtime(ref) > os.path.getmtime(src):
+                    return False
+            except Exception:
+                pass
         d = os.path.dirname(ref)
         if not os.path.isdir(d):
             os.makedirs(d, exist_ok=True)
@@ -1035,6 +1065,82 @@ def find_selfbot():
     return os.path.join(selfbot_search_dirs()[0], SELF_NAME)
 
 
+def ensure_selfbot_current(path=None):
+    """اگر نسخه‌ی مرجعِ ایمیج تازه‌تر از نسخه‌ی اجراست، نسخه‌ی اجرا را از آن
+    به‌روز کن. True یعنی فایل عوض شد.
+
+    این لایه‌ی دومِ دفاع است: railway-start.sh همین کار را قبل از بوت می‌کند،
+    ولی اگر کسی manager را مستقیم اجرا کند (start command دستی) یا سلف بعد از
+    بوت خراب شود، اینجا نسخه‌ی سالم ایمیج جایگزین می‌شود.
+    """
+    try:
+        path = os.path.abspath(path or SELFBOT)
+        ref = os.path.abspath(SELFBOT_REF)
+        if path == ref or not os.path.isfile(ref):
+            return False
+        if not os.path.isfile(path):
+            return _restore_selfbot(path)
+        try:
+            if os.path.getmtime(ref) <= os.path.getmtime(path):
+                return False        # نسخه‌ی اجرا قدیمی نیست — دست نمی‌زنیم
+        except Exception:
+            return False
+        with open(ref, "rb") as f:
+            fresh = f.read()
+        with open(path, "rb") as f:
+            current = f.read()
+        if not fresh or fresh == current:
+            return False
+        tmp = path + ".incoming"
+        with open(tmp, "wb") as f:
+            f.write(fresh)
+        os.replace(tmp, path)       # جای symlink خراب/حلقه‌ای را هم می‌گیرد
+        print(f"  ♻️ سلف از نسخه‌ی ایمیج به‌روز شد: {path}", flush=True)
+        return True
+    except Exception as e:
+        print("refresh selfbot:", e, flush=True)
+        return False
+
+
+def image_dir():
+    """پوشه‌ی غیرقابل‌تغییر ایمیج (جایی که railway-start.sh کد را از آن اجرا
+    می‌کند). روی ترموکس/اجرای دستی معمولاً وجود ندارد."""
+    return os.environ.get("JAFJ_IMAGE_DIR") \
+        or os.path.dirname(os.path.abspath(SELFBOT_REF))
+
+
+def ensure_fresh_code():
+    """اگر نسخه‌ی دیگری از manager_82.py اجرا شده و نسخه‌ی ایمیج فرق دارد،
+    خودمان را از روی نسخه‌ی ایمیج دوباره exec می‌کنیم.
+
+    دلیلش: روی Railway اگر Volume روی /app باشد یا start command دستی روی
+    «python manager_82.py» تنظیم شده باشد، کد قدیمی اجرا می‌شود و هر دیپلوی
+    بی‌اثر می‌ماند (همان «فایل 95.py پیدا نشد» همیشگی).
+    """
+    try:
+        if os.environ.get("JAFJ_REEXEC_GUARD"):
+            return False                       # جلوی حلقه‌ی exec بی‌پایان
+        mine = os.path.abspath(sys.argv[0] or __file__)
+        fresh = os.path.join(image_dir(), "manager_82.py")
+        if not os.path.isfile(fresh) or os.path.abspath(fresh) == mine:
+            return False
+        if not os.path.isfile(mine):
+            return False
+        with open(mine, "rb") as f:
+            a = f.read()
+        with open(fresh, "rb") as f:
+            b = f.read()
+        if a == b:
+            return False
+        print(f"  ♻️ کد قدیمی اجرا شده بود ({mine}) — از نسخه‌ی ایمیج "
+              f"({fresh}) دوباره اجرا می‌شود", flush=True)
+        os.environ["JAFJ_REEXEC_GUARD"] = "1"
+        os.execv(sys.executable, [sys.executable, fresh] + sys.argv[1:])
+    except Exception as e:
+        print("ensure_fresh_code:", e, flush=True)
+    return False
+
+
 SELFBOT = find_selfbot()
 
 # ── تنظیمات مستقیم داخل همین فایل Python ──
@@ -1057,9 +1163,44 @@ def build_stamp():
         s = globals().get("SELFBOT") or ""
         bn = os.path.basename(s) if s else "?"
         dn = os.path.dirname(s) if s else "?"
-        return f"build {BUILD_VERSION} · self {bn} در {dn} · cwd {os.getcwd()}"
+        return (f"build {BUILD_VERSION} · self {bn} در {dn} · cwd {os.getcwd()}"
+                f" · code {os.path.dirname(os.path.abspath(sys.argv[0] or __file__))}")
     except Exception:
         return f"build {BUILD_VERSION}"
+
+
+HOSTED_ENV_KEYS = ("RAILWAY_ENVIRONMENT", "RAILWAY_SERVICE_ID", "RAILWAY_PROJECT_ID",
+                   "RENDER", "FLY_APP_NAME", "HEROKU_APP_NAME", "KOYEB_APP_NAME")
+
+
+def is_hosted():
+    """روی سرویس میزبان (Railway و…) هستیم؟
+
+    آنجا exit کردن پروسه = ری‌استارت کامل کانتینر؛ پس خطای موقتی مثل
+    FloodWait نباید پروسه را بمیراند، وگرنه کرش‌لوپ می‌شود.
+    """
+    if any((os.environ.get(k) or "").strip() for k in HOSTED_ENV_KEYS):
+        return True
+    return (os.environ.get("JAFJ_HOSTED") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def login_retry_forever():
+    """آیا بعد از شکست ورود، به‌جای exit کردن به تلاش ادامه بدهیم؟"""
+    raw = (os.environ.get("JAFJ_LOGIN_RETRY") or "").strip().lower()
+    if raw in ("off", "0", "no", "false", "exit"):
+        return False
+    if raw in ("forever", "always", "1", "true", "yes", "on"):
+        return True
+    return is_hosted()      # پیش‌فرض: روی Railway زنده بمان، روی ترموکس exit کن
+
+
+def login_retry_wait(round_no, base=20, cap=300):
+    """فاصله‌ی بین تلاش‌های ورود: ۲۰، ۴۰، ۶۰ … تا سقف ۳۰۰ ثانیه."""
+    try:
+        n = max(1, int(round_no))
+    except Exception:
+        n = 1
+    return max(5, min(base * n, cap))
 
 
 def backup_interval():
@@ -1622,8 +1763,12 @@ class Supervisor:
         if not os.path.isfile(src):
             _restore_selfbot(src)          # نسخه مرجع ایمیج، بدون ری‌استارت
         if not os.path.isfile(src):
+            # پیام باید بگوید مشکل کجاست، نه فقط اینکه فایل نیست.
+            hint = ("نسخه‌ی مرجع هست ولی بازسازی نشد؛ دسترسی نوشتن پوشه را چک کن"
+                    if os.path.isfile(SELFBOT_REF) else
+                    "نسخه‌ی مرجع هم نیست؛ ایمیج قدیمی است — Redeploy بزن")
             return False, (f"فایل {src} پیدا نشد (cwd={os.getcwd()}، "
-                           f"مرجع={SELFBOT_REF})")
+                           f"مرجع={SELFBOT_REF}) — {hint}")
         if os.path.abspath(dst) == src:          # پوشه مشتری = پوشه سلف
             return True, ""
         try:
@@ -5444,6 +5589,28 @@ class Manager:
     # ═══════════════════════════════════════════════
     #  ورود ربات + پشتیبان خودکار (v0905-fix2)
     # ═══════════════════════════════════════════════
+    async def login_with_patience(self, tries=5):
+        """login_bot را تا موفقیت تکرار می‌کند.
+
+        چرا: قبلاً بعد از ۵ تلاش، run() مقدار ۱ برمی‌گرداند و پروسه exit(1)
+        می‌شد. روی Railway یعنی کانتینر می‌میرد، ری‌استارت می‌شود، دوباره
+        FloodWait می‌گیرد و… — همان «ریل‌وی همش کرش می‌کند». اینجا روی محیط
+        میزبان پروسه زنده می‌ماند (وب‌سرور سلامت هم بالاست) و با فاصله‌ی
+        فزاینده دوباره تلاش می‌کند.
+        """
+        round_no = 0
+        while True:
+            round_no += 1
+            try:
+                return await self.login_bot(tries=tries)
+            except Exception as e:
+                if not login_retry_forever():
+                    raise
+                wait = login_retry_wait(round_no)
+                print(f"  🔁 ورود ناموفق ({type(e).__name__}: {e}) — پروسه زنده "
+                      f"می‌ماند، {wait}s دیگر تلاش {round_no + 1}", flush=True)
+                await asyncio.sleep(wait)
+
     async def login_bot(self, tries=5):
         """ورود ربات با نشست ذخیره‌شده + تحمل FloodWait.
 
@@ -6101,6 +6268,7 @@ class Manager:
 
         global SELFBOT
         SELFBOT = find_selfbot()
+        ensure_selfbot_current(SELFBOT)      # اگر ایمیج تازه‌تر است، جایگزین شود
         if not os.path.isfile(SELFBOT):
             print(f"\n⚠️ فایل سلف پیدا نشد: {SELFBOT}")
             print(f"   نسخه مرجع: {SELFBOT_REF}"
@@ -6115,7 +6283,7 @@ class Manager:
 
         # ورود با نشست ذخیره‌شده + تحمل FloodWait (بدون چرخه کرش)
         try:
-            await self.login_bot(tries=5)
+            await self.login_with_patience(tries=5)
         except Exception as e:
             print(f"\n⛔ ورود ناموفق پس از تلاش‌ها: {type(e).__name__}: {e}")
             print("   توکن/api یا محدودیت FloodWait را چک کن.\n")
@@ -6591,6 +6759,9 @@ class Manager:
 
 
 def main():
+    # اگر کد قدیمی (مثلاً از یک Volume کهنه) اجرا شده باشد، از نسخه‌ی ایمیج
+    # دوباره اجرا شو؛ وگرنه هر دیپلوی بی‌اثر می‌ماند.
+    ensure_fresh_code()
     print(f"\n{BUILD_TAG}", flush=True)
     print(f"  🆔 PID: {os.getpid()} — فقط یک پروسه باید این خط را نشان دهد", flush=True)
     # همیشه از پوشه‌ی خود فایل اجرا کن تا اگر از جای دیگری اجرا شد،
@@ -6625,17 +6796,23 @@ def main():
 
     global SELFBOT
     SELFBOT = find_selfbot()
+    ensure_selfbot_current(SELFBOT)     # نسخه‌ی ایمیج تازه‌تر باشد، جایگزین کن
     if os.path.isfile(SELFBOT):
         ensure_selfbot_ref(SELFBOT)     # نسخه مرجع برای بازسازی در بوت بعدی
     else:
         print(f"⚠️ فایل سلف پیدا نشد — مسیرهای جستجو: "
               f"{', '.join(selfbot_search_dirs())}", flush=True)
+        print(f"   نسخه مرجع: {SELFBOT_REF} "
+              f"{'(سالم است)' if os.path.isfile(SELFBOT_REF) else '(یافت نشد)'}",
+              flush=True)
     try:
         maybe_migrate_to_data_dir()
     except Exception:
         pass
     try:
         print(f"  {build_stamp()}", flush=True)
+        print(f"  📂 داده: {os.path.abspath(BASE_DIR)}  ·  کد: {image_dir()}",
+              flush=True)
     except Exception:
         pass
     m = Manager()
