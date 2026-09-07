@@ -1144,12 +1144,182 @@ def ensure_fresh_code():
 SELFBOT = find_selfbot()
 
 # ── تنظیمات مستقیم داخل همین فایل Python ──
-BOT_TOKEN = "8789173370:AAFldI-budd0hsXlVRnOlLndl3e5wOeb5aU"
+# توکن تازه در BotFather صادر شده (توکن قبلی Revoke شد تا سرویس زامبیِ
+# حساب Railway قدیمی که دسترسی‌اش از دست رفته، کور شود).
+BOT_TOKEN = "8832561144:AAFSRpyaD4M9GWWsiltBMXs6acbbo6W0J-M"
 API_ID = 28039994
 API_HASH = "00877cdcd706564a4de6abf7f7d64349"
 ADMIN_IDS = [8287266200]
-BUILD_VERSION = "v0906-railway"
-BUILD_TAG = "JAFJ_MANAGER_82_v0906-railway_2026_09_06"
+BUILD_VERSION = "v0909-railway"
+BUILD_TAG = "JAFJ_MANAGER_82_v0909-railway_2026_09_07"
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  شناسه‌ی نمونه (instance) + تشخیص «سرویس قدیمی هنوز روشنه»
+#
+#  وقتی روی Railway دو سرویس/دو دیپلویِ همین ربات هم‌زمان بالا باشند، تلگرام
+#  آپدیت‌ها را بین هر دو کانکشن پخش می‌کند: دکمه‌ی «روشن کن» یک‌بار به نسخه‌ی
+#  جدید می‌رسد (که سالم است) و بار دیگر به سرویس قدیمی که 95.py داخل ایمیجش
+#  نیست و «فایل 95.py پیدا نشد» می‌دهد. ریشه‌ی آن باگ و باگ «ریل‌وی قدیمی
+#  هنوز روشنه» یکی است. این بخش با یک «ضربان» (beacon) در چت مدیر، نمونه‌های
+#  هم‌زمان را پیدا می‌کند و هشدار واضح می‌دهد.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# تصادفی برای هر پروسه — هر ری‌استارت عوض می‌شود.
+INSTANCE_ID = os.environ.get("JAFJ_INSTANCE_ID", "").strip() or "".join(
+    random.choice("0123456789abcdef") for _ in range(4))
+# ثابت تا وقتی داده‌ها (Volume) یکی است — یعنی همان سرویس/دیپلوی.
+DEPLOY_ID = ""
+
+
+def _load_deploy_id():
+    """شناسه‌ی پایدار این سرویس؛ داخل داده‌ها ذخیره می‌شود تا ری‌استارت عوضش
+    نکند ولی دو سرویس جدا (با Volume/داده‌ی جدا) شناسه‌ی متفاوت داشته باشند."""
+    global DEPLOY_ID
+    try:
+        path = os.path.join(os.path.abspath(BASE_DIR), ".jafj_deploy_id")
+        did = ""
+        try:
+            with open(path, encoding="utf-8") as f:
+                did = f.read().strip()
+        except Exception:
+            did = ""
+        if not did or not re.fullmatch(r"[0-9a-f]{6,16}", did):
+            did = "".join(random.choice("0123456789abcdef") for _ in range(8))
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(did)
+            except Exception:
+                pass
+        DEPLOY_ID = did
+    except Exception:
+        DEPLOY_ID = "".join(random.choice("0123456789abcdef") for _ in range(8))
+
+
+_load_deploy_id()
+
+
+def host_label():
+    """برچسب کوتاه محل اجرا (railway-us-east / local / …) برای پیام‌ها."""
+    for key in ("RAILWAY_SERVICE_NAME", "RAILWAY_SERVICE_ID",
+                "FLY_APP_NAME", "KOYEB_APP_NAME", "HEROKU_APP_NAME",
+                "RENDER_SERVICE_NAME"):
+        v = (os.environ.get(key) or "").strip()
+        if v:
+            return re.sub(r"\s+", "-", v)[:24]
+    try:
+        import socket
+        return "host-" + (socket.gethostname() or "local")[:12]
+    except Exception:
+        return "local"
+
+
+HOST_LABEL = host_label()
+BEACON_TAG = "#JAFJBEACON"
+
+
+def beacon_text():
+    """متن ضربانِ همین نمونه (هر ~۶۰ ثانیه edit می‌شود)."""
+    return (f"{BEACON_TAG} <code>i={INSTANCE_ID}</code> <code>d={DEPLOY_ID}</code> "
+            f"<code>b={BUILD_VERSION}</code> <code>h={HOST_LABEL}</code> "
+            f"<code>t={int(time.time())}</code>")
+
+
+# تگ‌های <code>…</code> که دور فیلدها پیچیده شده‌اند نباید مچ را خراب کنند؛
+# بین فیلدها هر ترکیبی از فاصله/تگ مجاز است.
+_BEACON_RE = re.compile(
+    r"#JAFJBEACON(?:\s|</?[a-z]+>)+"
+    r"i=(?P<inst>[0-9a-z]{2,16})(?:\s|</?[a-z]+>)+"
+    r"d=(?P<dep>[0-9a-f]{6,16})(?:\s|</?[a-z]+>)+"
+    r"b=(?P<build>[0-9A-Za-z._\-]{1,40})(?:\s|</?[a-z]+>)+"
+    r"h=(?P<host>[0-9A-Za-z._\-]{1,40})(?:\s|</?[a-z]+>)+"
+    r"t=(?P<ts>\d{6,12})")
+
+
+def parse_beacon(text):
+    """متن پیام را می‌خواند؛ اگر ضربان جفج باشد دیکشنری شناسه برمی‌گرداند."""
+    if not text:
+        return None
+    m = _BEACON_RE.search(str(text))
+    if not m:
+        return None
+    d = m.groupdict()
+    try:
+        d["ts"] = int(d["ts"])
+    except Exception:
+        d["ts"] = 0
+    return d
+
+
+def scan_beacons(messages, my_deploy=None, window_sec=170, now_ts=None):
+    """از میان پیام‌های اخیرِ چت، ضربانِ زنده را جدا می‌کند.
+
+    ورودی: لیستی از دیکشنری {"text", "edit_ts" (آخرین ویرایش/ارسال، ثانیه)}.
+    خروجی: (mine, foreign) — mine = ضربان همین نمونه (dep یکسان)،
+    foreign = ضربان زنده‌ی نمونه‌های دیگر (dep متفاوت و تازه‌تر از window).
+    خالص است تا بدون تلگرام قابل تست باشد.
+    """
+    my_deploy = my_deploy or DEPLOY_ID
+    now_ts = int(now_ts if now_ts is not None else time.time())
+    mine, foreign = [], []
+    for msg in messages:
+        b = parse_beacon(msg.get("text"))
+        if not b:
+            continue
+        age = now_ts - int(msg.get("edit_ts") or b.get("ts") or 0)
+        if age > window_sec:
+            continue          # ضربانِ خاموش/قدیمی — مرده فرض می‌شود
+        if b["dep"] == my_deploy:
+            mine.append(b)
+        else:
+            foreign.append(b)
+    return mine, foreign
+
+
+def count_legacy_foreign(msgs, bot_id, sent_ids, live_ids, boot_at,
+                         window_sec=170, now_ts=None):
+    """پیام‌هایِ نسخه‌ی زامبیِ قدیمی (که ضربان ندارد) را می‌شمارد.
+
+    «بیگانه» یعنی: فرستنده خودِ ربات است ولی این نمونه نفرستاده/ویرایشش نکرده،
+    متن دارد، تازه است (در window_sec ثانیه‌ی اخیر) و مربوط به قبل از بوت این
+    نمونه نیست. خالص است تا بدون تلگرام تست شود.
+
+    ورودی msgs: لیستی از دیکشنری {"id", "sender_id", "text", "ts" (epoch)}
+    """
+    now_ts = int(now_ts if now_ts is not None else time.time())
+    sent_ids = set(sent_ids or ())
+    live_ids = set(live_ids or ())
+    hits = 0
+    for m in msgs:
+        try:
+            if not bot_id or int(m.get("sender_id", 0)) != bot_id:
+                continue
+            txt = (m.get("text") or "").strip()
+            if not txt or parse_beacon(txt):
+                continue
+            mts = int(m.get("ts", 0))
+            if now_ts - mts > window_sec:
+                continue
+            if mts < int(boot_at) - 5:
+                continue
+            if m.get("id") in sent_ids or m.get("id") in live_ids:
+                continue
+            hits += 1
+        except Exception:
+            continue
+    return hits
+
+
+def _self_sync_failure_hint(sync_err):
+    """وقتی سلف بالا نمی‌آید، در محیط میزبان محتمل‌ترین علت را بگو."""
+    if is_hosted():
+        return ("\n\n<b>🔸 روی Railway هستی؟ این خطا یعنی همین سرویس نسخه‌ی "
+                "قدیمی است.</b>\n"
+                "۱) در داشبورد Railway این سرویس را Remove/Redeploy کن و "
+                "مطمئن شو فقط یک سرویس از این ربات روشن است.\n"
+                "۲) دو سرویسِ هم‌زمان با یک توکن، آپدیت‌ها را نصف‌ونیمه "
+                "می‌گیرند؛ سرویس قدیمی را خاموش کن.")
+    return ""
+
 
 # ── نشست ذخیره‌شده ربات مدیر (جلوگیری از ImportBotAuthorization در هر بوت) ──
 BOT_SESSION_FILE = os.path.join(BASE_DIR, "manager_bot.string")
@@ -1201,6 +1371,23 @@ def login_retry_wait(round_no, base=20, cap=300):
     except Exception:
         n = 1
     return max(5, min(base * n, cap))
+
+
+# خطاهایی که یعنی «توکن مرده/باطل‌شده» است، نه مشکل شبکه. در این حالت به‌جای
+# حلقه‌ی انتظار روی همان توکن، سراغ توکن بعدی (هاردکد داخل ایمیج) می‌رویم — این
+# همان شفای خودکار بعد از Revoke در BotFather است.
+_DEAD_TOKEN_MARKS = (
+    "unauthorized", "auth key", "authkey", "revoked", "invalid",
+    "token", "deactivated", "forbidden", "bot was", "banned")
+
+
+def is_dead_token_error(exc):
+    """True یعنی توکن فعلی معتبر نیست (b/Revoke شده) و باید عوضش کرد."""
+    try:
+        msg = f"{type(exc).__name__} {exc}".lower()
+    except Exception:
+        return False
+    return any(k in msg for k in _DEAD_TOKEN_MARKS)
 
 
 def backup_interval():
@@ -1868,7 +2055,8 @@ class Supervisor:
         ok_sync, sync_err = self.sync_selfbot(uid)
         if not ok_sync:
             self.last_failure[uid] = "manager"
-            return False, "به‌روزرسانی فایل سلف نشد: " + sync_err + " · " + build_stamp()
+            return False, ("به‌روزرسانی فایل سلف نشد: " + sync_err + " · "
+                           + build_stamp() + _self_sync_failure_hint(sync_err))
         logf = open(os.path.join(folder, "run.log"), "a", encoding="utf-8")
         logf.write(f"\n===== start {datetime.now():%Y-%m-%d %H:%M:%S} =====\n")
         logf.flush()
@@ -2218,6 +2406,7 @@ class Manager:
         self.shop = Shop()
         self._receipts = {}
         self._live = set()      # آیدی پیام‌هایی که همین نشست ساخته‌ایم
+        self._sent_ids = set()  # همه‌ی پیام‌های فرستاده‌ی این نمونه (تشخیص زامبی)
         self.boot_at = now()    # زمان بالا آمدن
         self.fsm = {}            # uid -> {"step":..., "client":..., "phone":...}
         self.bot = None
@@ -5566,6 +5755,160 @@ class Manager:
                 print("points_loop:", e)
             await asyncio.sleep(300)
 
+    async def duplicate_watch_loop(self):
+        """تشخیص «نسخه‌ی دیگری از همین ربات هم‌زمان روشنه».
+
+        هر دقیقه یک پیام ضربان در چت مدیر edit می‌کند و ضربانِ تازه‌ی نمونه‌های
+        دیگر (DEPLOY_ID متفاوت) را می‌خواند. اگر همان نمونه‌ی غریبه در دو اسکن
+        پیاپی ضربانش تازه مانده باشد (یعنی ری‌استارت/دیپلویِ سالم نیست و واقعاً
+        یک سرویس دوم زنده است)، هشدار می‌دهد: همان ریشه‌ی «فایل 95.py پیدا
+        نشد» و «ریل‌وی قدیمی هنوز روشنه».
+        """
+        try:
+            me = await self.bot.get_me()
+            bot_id = getattr(me, "id", 0) or 0
+        except Exception:
+            bot_id = 0
+        # chat -> آخرین پیام ضربان خودمان (برای edit به‌جای اسپم)
+        my_beacon = {}
+        # dep غریبه -> اسکن‌های پیاپی‌ای که زنده دیده شده
+        seen = {}
+        # ردِ فعالیتِ بیگانه‌ی نسخه‌ی قدیمی (که ضربان ندارد)
+        legacy_seen = 0
+        last_alert = 0.0
+        alerts_sent = 0
+        MAX_ALERTS = 4
+        ALERT_EVERY = 900        # بین هشدارها حداقل ۱۵ دقیقه
+        while True:
+            try:
+                foreign_live = []
+                legacy_hits = 0
+                for a in self.cfg.get("admin_ids") or []:
+                    try:
+                        msgs = await self.bot.get_messages(a, limit=25)
+                    except Exception:
+                        continue
+                    parsed = []
+                    stale_own = []
+                    raw = []
+                    for m in msgs:
+                        try:
+                            txt = m.message or ""
+                        except Exception:
+                            continue
+                        try:
+                            raw.append({
+                                "id": m.id,
+                                "sender_id": getattr(m, "sender_id", 0) or 0,
+                                "text": txt,
+                                "ts": int((m.edit_date or m.date).timestamp()),
+                            })
+                        except Exception:
+                            pass
+                        b = parse_beacon(txt)
+                        if not b:
+                            continue
+                        try:
+                            ets = int((m.edit_date or m.date).timestamp())
+                        except Exception:
+                            ets = b["ts"]
+                        parsed.append({"text": txt, "edit_ts": ets})
+                        # ضربانِ مرده‌ی خودمان (از ری‌استارت قبل) را پاک کن
+                        if b["dep"] == DEPLOY_ID and int(time.time()) - ets > 1800:
+                            stale_own.append(m)
+                    for m in stale_own:
+                        try:
+                            await m.delete()
+                        except Exception:
+                            pass
+                    mine, foreign = scan_beacons(parsed)
+                    foreign_live.extend(foreign)
+                    # ── نسخه‌ی قدیمیِ زامبی (ضربان ندارد) از روی فعالیتش ──
+                    legacy_hits += count_legacy_foreign(
+                        raw, bot_id, self._sent_ids, self._live, self.boot_at)
+                    # ── ضربان خودمان: edit کن، وگرنه تازه بفرست ──
+                    existing = None
+                    for m in msgs:
+                        b = parse_beacon(getattr(m, "message", "") or "")
+                        if b and b["dep"] == DEPLOY_ID:
+                            existing = m
+                            break
+                    try:
+                        if existing is not None:
+                            await self.bot.edit_message(a, existing, beacon_text())
+                            my_beacon[a] = existing.id
+                        else:
+                            sent = await self.bot.send_message(a, beacon_text())
+                            my_beacon[a] = getattr(sent, "id", None)
+                    except Exception as e:
+                        print("beacon:", type(e).__name__, e)
+
+                # ── تصمیم هشدار: غریبه باید در دو اسکن پیاپی زنده باشد ──
+                deps_now = {b["dep"]: b for b in foreign_live}
+                confirmed = {}
+                for dep, b in list(deps_now.items()):
+                    seen[dep] = seen.get(dep, 0) + 1
+                    if seen[dep] >= 2:
+                        confirmed[dep] = b
+                for dep in list(seen):
+                    if dep not in deps_now:
+                        seen.pop(dep, None)
+
+                # نسخه‌ی قدیمی هم اگر دو اسکن پیاپی پیامِ تازه‌ی بیگانه داشته
+                # باشد، زنده است (روی ۳ دقیقه اخیر دیده شود، بعد صفر می‌شود).
+                if legacy_hits:
+                    legacy_seen += 1
+                else:
+                    legacy_seen = 0
+                legacy_confirmed = legacy_seen >= 2
+
+                if (confirmed or legacy_confirmed) and alerts_sent < MAX_ALERTS \
+                        and time.time() - last_alert > ALERT_EVERY:
+                    last_alert = time.time()
+                    alerts_sent += 1
+                    lines = ["⚠️ <b>نسخه‌ی دیگری از همین ربات هم‌زمان روشن است!</b>",
+                             "",
+                             "چند سرویس/دیپلوی با یک توکن به تلگرام وصل‌اند؛ "
+                             "تلگرام پیام‌ها و دکمه‌ها را بینشان پخش می‌کند. "
+                             "به همین خاطر است که گاهی «فایل 95.py پیدا نشد» "
+                             "می‌آید و ریل‌وی قدیمی هنوز پاسخ می‌دهد.",
+                             "",
+                             f"نمونه‌ی خودت: <code>{INSTANCE_ID}</code> · "
+                             f"<code>{BUILD_VERSION}</code> · {HOST_LABEL}"]
+                    if confirmed:
+                        lines.append("نمونه(های) دارای ضربان:")
+                        for b in list(confirmed.values())[:4]:
+                            lines.append(f"  • <code>{b['build']}</code> — {b['host']}")
+                    if legacy_confirmed:
+                        lines.append("+ یک نمونه‌ی نسخه‌ی قدیمی هم دارد پیام "
+                                     "می‌فرستد (ضربان ندارد — احتمالاً همان "
+                                     "سرویس Railway که به حسابش دسترسی نداری).")
+                    lines += [
+                        "",
+                        "🔧 <b>اگر به سرویس قدیمی دسترسی داری:</b> توی داشبورد "
+                        "Railway سرویس اضافی را <b>Remove</b> کن؛ فقط یک سرویس "
+                        "بماند و اینجا Redeploy بزن.",
+                        "",
+                        "🔑 <b>اگر دسترسی نداری (حسابش پریده):</b> توکن ربات "
+                        "را عوض کن تا سرویس قدیمی کور شود:",
+                        "۱) در تلگرام به <b>@BotFather</b> برو → <code>/mybots</code> "
+                        "→ رباتت → <b>API Token</b> → <b>Revoke current token</b>",
+                        "۲) توکن جدید را در متغیرهای محیطی همین سرویس بگذار "
+                        "(<code>BOT_TOKEN</code>) و Redeploy بزن (یا فایل "
+                        "manager_config.json را به‌روز کن).",
+                        "۳) فایل <code>manager_bot.string</code> لازم نیست "
+                        "دست بزنی؛ خودش با توکن جدید دوباره ساخته می‌شود."]
+                    for a in self.cfg.get("admin_ids") or []:
+                        try:
+                            await self.bot.send_message(a, "\n".join(lines),
+                                                        parse_mode="html",
+                                                        link_preview=False)
+                        except Exception:
+                            pass
+            except Exception as e:
+                print("duplicate_watch:", e)
+            await asyncio.sleep(60)
+
     async def reminder_loop(self):
         """یادآوری تمدید چند روز قبل از انقضا."""
         sent = set()
@@ -5799,57 +6142,110 @@ class Manager:
                 continue
 
             # ── 2) ورود با توکن ──
-            client2 = None
-            try:
-                client2 = TelegramClient(StringSession(), api_id, api_hash)
-                await client2.start(bot_token=token)
-                # ذخیره نشست
+            # لیست توکن‌ها: اول توکن تنظیمات/متغیر محیطی، بعد توکن هاردکد داخل
+            # همین فایل (ایمیج). اگر توکن قبلی در BotFather باطل (Revoke) شده و
+            # توکن جدید در کد آمده ولی توکن کهنه توی manager_config.json یا
+            # متغیر BOT_TOKEN گیر کرده باشد، خودکار سراغ هاردکد می‌رویم.
+            candidates = []
+            for t in (token, BOT_TOKEN):
+                t = (t or "").strip()
+                if t and t not in candidates:
+                    candidates.append(t)
+            for ci, cand in enumerate(candidates):
+                client2 = None
                 try:
-                    s = StringSession.save(client2.session)
-                    if s:
-                        with open(BOT_SESSION_FILE, "w", encoding="utf-8") as f:
-                            f.write(s)
+                    client2 = TelegramClient(StringSession(), api_id, api_hash)
+                    await client2.start(bot_token=cand)
+                    if cand != token:
+                        print("  🔑 توکن تنظیمات معتبر نبود؛ با توکن داخل کد وارد "
+                              "شدم و تنظیمات را به‌روز می‌کنم", flush=True)
                         try:
-                            os.chmod(BOT_SESSION_FILE, 0o600)
+                            self.cfg["bot_token"] = cand
                         except Exception:
                             pass
-                        print(f"  💾 نشست ربات ذخیره شد ({len(s)} حرف)", flush=True)
+                    # نشست ذخیره شود
+                    try:
+                        s = StringSession.save(client2.session)
+                        if s:
+                            with open(BOT_SESSION_FILE, "w", encoding="utf-8") as f:
+                                f.write(s)
+                            try:
+                                os.chmod(BOT_SESSION_FILE, 0o600)
+                            except Exception:
+                                pass
+                            print(f"  💾 نشست ربات ذخیره شد ({len(s)} حرف)", flush=True)
+                    except Exception as e:
+                        print(f"  ⚠️ ذخیره نشست: {type(e).__name__}: {e}", flush=True)
+                    self.bot = client2
+                    return client2
                 except Exception as e:
-                    print(f"  ⚠️ ذخیره نشست: {type(e).__name__}: {e}", flush=True)
-                self.bot = client2
-                return client2
-            except Exception as e:
-                secs = _flood_seconds(e)
-                if secs is not None:
-                    wait = min(max(0, secs), 3600) + 30
-                    print(f"  ⏳ FloodWait روی ورود ({secs}s) — خواب {wait}s (تلاش {attempt}/{tries})", flush=True)
-                    try:
-                        if client2 is not None:
-                            try:
-                                await client2.disconnect()
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-                    await asyncio.sleep(wait)
+                    secs = _flood_seconds(e)
+                    if secs is not None:
+                        wait = min(max(0, secs), 3600) + 30
+                        print(f"  ⏳ FloodWait روی ورود ({secs}s) — خواب {wait}s (تلاش {attempt}/{tries})", flush=True)
+                        try:
+                            if client2 is not None:
+                                try:
+                                    await client2.disconnect()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        await asyncio.sleep(wait)
+                        last_err = e
+                        break
+                    dead = is_dead_token_error(e)
                     last_err = e
-                    continue
-                last_err = e
-                if attempt < tries:
-                    wait = min(10 * attempt, 60)
-                    print(f"  ⚠️ ورود ناموفق ({type(e).__name__}: {e}) — تلاش {attempt}/{tries}، خواب {wait}s", flush=True)
-                    try:
-                        if client2 is not None:
+                    if ci < len(candidates) - 1:
+                        if dead:
+                            print(f"  ⚠️ توکن {ci + 1} باطل است ({type(e).__name__}) — "
+                                  f"توکن بعدی را امتحان می‌کنم", flush=True)
                             try:
-                                await client2.disconnect()
+                                if client2 is not None:
+                                    try:
+                                        await client2.disconnect()
+                                    except Exception:
+                                        pass
                             except Exception:
                                 pass
-                    except Exception:
-                        pass
-                    await asyncio.sleep(wait)
-                    continue
-                print(f"  ⛔ ورود ناموفق پس از {tries} تلاش: {type(e).__name__}: {e}", flush=True)
-                raise
+                            # نشستِ متعلق به توکن باطل را پاک کن تا دوباره استفاده نشود
+                            try:
+                                if os.path.exists(BOT_SESSION_FILE):
+                                    os.remove(BOT_SESSION_FILE)
+                            except Exception:
+                                pass
+                            continue
+                        # توکن بعدی هم هست ولی خطا شبکه‌ای بود؛ صبر کن و کل دور را تکرار کن
+                        wait = min(10 * attempt, 60)
+                        print(f"  ⚠️ ورود ناموفق ({type(e).__name__}: {e}) — خواب {wait}s", flush=True)
+                        try:
+                            if client2 is not None:
+                                try:
+                                    await client2.disconnect()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        await asyncio.sleep(wait)
+                        break
+                    if attempt < tries:
+                        wait = min(10 * attempt, 60)
+                        print(f"  ⚠️ ورود ناموفق ({type(e).__name__}: {e}) — تلاش {attempt}/{tries}، خواب {wait}s", flush=True)
+                        try:
+                            if client2 is not None:
+                                try:
+                                    await client2.disconnect()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        await asyncio.sleep(wait)
+                        break
+                    print(f"  ⛔ ورود ناموفق پس از {tries} تلاش: {type(e).__name__}: {e}", flush=True)
+                    raise
+
+            # اگر از حلقه‌ی کاندیدها بدون return بیرون آمدیم (flood/شبکه/انتظار)،
+            # دور بیرونی (attempt) خودش دوباره تلاش می‌کند.
 
         if last_err is not None:
             raise last_err
@@ -6291,6 +6687,33 @@ class Manager:
             print("   توکن/api یا محدودیت FloodWait را چک کن.\n")
             return 1
 
+        # آیدی هر پیامی که این نمونه می‌فرستد را نگه دار تا نمونه‌ی زامبیِ
+        # هم‌زمان (نسخه‌ی قدیمیِ بی‌ضربان) را از روی فعالیتش تشخیص بدهیم.
+        try:
+            bot_id_track = getattr((await self.bot.get_me()), "id", 0) or 0
+            _orig_send = self.bot.send_message
+
+            def _track(r):
+                try:
+                    self._sent_ids.add(getattr(r, "id", 0))
+                    if len(self._sent_ids) > 4000:
+                        self._sent_ids = set(sorted(self._sent_ids)[-2000:])
+                except Exception:
+                    pass
+                return r
+
+            async def _tracking_send(chat, *a, **k):
+                return _track(await _orig_send(chat, *a, **k))
+            self.bot.send_message = _tracking_send
+
+            _orig_edit = getattr(self.bot, "edit_message", None)
+            if _orig_edit is not None:
+                async def _tracking_edit(*a, **k):
+                    return _track(await _orig_edit(*a, **k))
+                self.bot.edit_message = _tracking_edit
+        except Exception:
+            bot_id_track = 0
+
         # فایل نشست قدیمی اگر مانده، پاکش کن (نسخه .string جایگزین شده)
         for junk in ("manager_bot.session", "manager_bot.session-journal"):
             try:
@@ -6332,6 +6755,7 @@ class Manager:
         print(f"{'='*54}\n")
 
         threading.Thread(target=self.sup.watchdog, daemon=True).start()
+        asyncio.create_task(self.duplicate_watch_loop())
         asyncio.create_task(self.reminder_loop())
         asyncio.create_task(self.points_loop())
         asyncio.create_task(self.trial_loop())
@@ -6751,8 +7175,13 @@ class Manager:
                     pass
 
         for a in c["admin_ids"]:
-            await self.say(a, "🟢 <b>ربات مدیر بالا آمد</b>",
-                           [[B("🛠 پنل مدیر", "a:home", "primary")]])
+            await self.say(
+                a,
+                "🟢 <b>ربات مدیر بالا آمد</b>\n"
+                f"<i>نسخه {BUILD_VERSION} · نمونه {INSTANCE_ID} · {HOST_LABEL}</i>\n"
+                "اگر دو پیام «بالا آمد» با نمونه‌های متفاوت می‌بینی، یعنی یک "
+                "سرویس قدیمیِ Railway هنوز روشن است — همان را خاموش کن.",
+                [[B("🛠 پنل مدیر", "a:home", "primary")]])
         if not c["admin_ids"]:
             print("  ⏳ منتظر اولین /start …\n", flush=True)
 
