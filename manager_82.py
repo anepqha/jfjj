@@ -1144,12 +1144,14 @@ def ensure_fresh_code():
 SELFBOT = find_selfbot()
 
 # ── تنظیمات مستقیم داخل همین فایل Python ──
-BOT_TOKEN = "8789173370:AAFldI-budd0hsXlVRnOlLndl3e5wOeb5aU"
+# توکن تازه در BotFather صادر شده (توکن قبلی Revoke شد تا سرویس زامبیِ
+# حساب Railway قدیمی که دسترسی‌اش از دست رفته، کور شود).
+BOT_TOKEN = "8832561144:AAFSRpyaD4M9GWWsiltBMXs6acbbo6W0J-M"
 API_ID = 28039994
 API_HASH = "00877cdcd706564a4de6abf7f7d64349"
 ADMIN_IDS = [8287266200]
-BUILD_VERSION = "v0908-railway"
-BUILD_TAG = "JAFJ_MANAGER_82_v0908-railway_2026_09_07"
+BUILD_VERSION = "v0909-railway"
+BUILD_TAG = "JAFJ_MANAGER_82_v0909-railway_2026_09_07"
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  شناسه‌ی نمونه (instance) + تشخیص «سرویس قدیمی هنوز روشنه»
