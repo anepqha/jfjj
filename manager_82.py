@@ -1148,8 +1148,142 @@ BOT_TOKEN = "8789173370:AAFldI-budd0hsXlVRnOlLndl3e5wOeb5aU"
 API_ID = 28039994
 API_HASH = "00877cdcd706564a4de6abf7f7d64349"
 ADMIN_IDS = [8287266200]
-BUILD_VERSION = "v0906-railway"
-BUILD_TAG = "JAFJ_MANAGER_82_v0906-railway_2026_09_06"
+BUILD_VERSION = "v0907-railway"
+BUILD_TAG = "JAFJ_MANAGER_82_v0907-railway_2026_09_07"
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  شناسه‌ی نمونه (instance) + تشخیص «سرویس قدیمی هنوز روشنه»
+#
+#  وقتی روی Railway دو سرویس/دو دیپلویِ همین ربات هم‌زمان بالا باشند، تلگرام
+#  آپدیت‌ها را بین هر دو کانکشن پخش می‌کند: دکمه‌ی «روشن کن» یک‌بار به نسخه‌ی
+#  جدید می‌رسد (که سالم است) و بار دیگر به سرویس قدیمی که 95.py داخل ایمیجش
+#  نیست و «فایل 95.py پیدا نشد» می‌دهد. ریشه‌ی آن باگ و باگ «ریل‌وی قدیمی
+#  هنوز روشنه» یکی است. این بخش با یک «ضربان» (beacon) در چت مدیر، نمونه‌های
+#  هم‌زمان را پیدا می‌کند و هشدار واضح می‌دهد.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# تصادفی برای هر پروسه — هر ری‌استارت عوض می‌شود.
+INSTANCE_ID = os.environ.get("JAFJ_INSTANCE_ID", "").strip() or "".join(
+    random.choice("0123456789abcdef") for _ in range(4))
+# ثابت تا وقتی داده‌ها (Volume) یکی است — یعنی همان سرویس/دیپلوی.
+DEPLOY_ID = ""
+
+
+def _load_deploy_id():
+    """شناسه‌ی پایدار این سرویس؛ داخل داده‌ها ذخیره می‌شود تا ری‌استارت عوضش
+    نکند ولی دو سرویس جدا (با Volume/داده‌ی جدا) شناسه‌ی متفاوت داشته باشند."""
+    global DEPLOY_ID
+    try:
+        path = os.path.join(os.path.abspath(BASE_DIR), ".jafj_deploy_id")
+        did = ""
+        try:
+            with open(path, encoding="utf-8") as f:
+                did = f.read().strip()
+        except Exception:
+            did = ""
+        if not did or not re.fullmatch(r"[0-9a-f]{6,16}", did):
+            did = "".join(random.choice("0123456789abcdef") for _ in range(8))
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(did)
+            except Exception:
+                pass
+        DEPLOY_ID = did
+    except Exception:
+        DEPLOY_ID = "".join(random.choice("0123456789abcdef") for _ in range(8))
+
+
+_load_deploy_id()
+
+
+def host_label():
+    """برچسب کوتاه محل اجرا (railway-us-east / local / …) برای پیام‌ها."""
+    for key in ("RAILWAY_SERVICE_NAME", "RAILWAY_SERVICE_ID",
+                "FLY_APP_NAME", "KOYEB_APP_NAME", "HEROKU_APP_NAME",
+                "RENDER_SERVICE_NAME"):
+        v = (os.environ.get(key) or "").strip()
+        if v:
+            return re.sub(r"\s+", "-", v)[:24]
+    try:
+        import socket
+        return "host-" + (socket.gethostname() or "local")[:12]
+    except Exception:
+        return "local"
+
+
+HOST_LABEL = host_label()
+BEACON_TAG = "#JAFJBEACON"
+
+
+def beacon_text():
+    """متن ضربانِ همین نمونه (هر ~۶۰ ثانیه edit می‌شود)."""
+    return (f"{BEACON_TAG} <code>i={INSTANCE_ID}</code> <code>d={DEPLOY_ID}</code> "
+            f"<code>b={BUILD_VERSION}</code> <code>h={HOST_LABEL}</code> "
+            f"<code>t={int(time.time())}</code>")
+
+
+# تگ‌های <code>…</code> که دور فیلدها پیچیده شده‌اند نباید مچ را خراب کنند؛
+# بین فیلدها هر ترکیبی از فاصله/تگ مجاز است.
+_BEACON_RE = re.compile(
+    r"#JAFJBEACON(?:\s|</?[a-z]+>)+"
+    r"i=(?P<inst>[0-9a-z]{2,16})(?:\s|</?[a-z]+>)+"
+    r"d=(?P<dep>[0-9a-f]{6,16})(?:\s|</?[a-z]+>)+"
+    r"b=(?P<build>[0-9A-Za-z._\-]{1,40})(?:\s|</?[a-z]+>)+"
+    r"h=(?P<host>[0-9A-Za-z._\-]{1,40})(?:\s|</?[a-z]+>)+"
+    r"t=(?P<ts>\d{6,12})")
+
+
+def parse_beacon(text):
+    """متن پیام را می‌خواند؛ اگر ضربان جفج باشد دیکشنری شناسه برمی‌گرداند."""
+    if not text:
+        return None
+    m = _BEACON_RE.search(str(text))
+    if not m:
+        return None
+    d = m.groupdict()
+    try:
+        d["ts"] = int(d["ts"])
+    except Exception:
+        d["ts"] = 0
+    return d
+
+
+def scan_beacons(messages, my_deploy=None, window_sec=170, now_ts=None):
+    """از میان پیام‌های اخیرِ چت، ضربانِ زنده را جدا می‌کند.
+
+    ورودی: لیستی از دیکشنری {"text", "edit_ts" (آخرین ویرایش/ارسال، ثانیه)}.
+    خروجی: (mine, foreign) — mine = ضربان همین نمونه (dep یکسان)،
+    foreign = ضربان زنده‌ی نمونه‌های دیگر (dep متفاوت و تازه‌تر از window).
+    خالص است تا بدون تلگرام قابل تست باشد.
+    """
+    my_deploy = my_deploy or DEPLOY_ID
+    now_ts = int(now_ts if now_ts is not None else time.time())
+    mine, foreign = [], []
+    for msg in messages:
+        b = parse_beacon(msg.get("text"))
+        if not b:
+            continue
+        age = now_ts - int(msg.get("edit_ts") or b.get("ts") or 0)
+        if age > window_sec:
+            continue          # ضربانِ خاموش/قدیمی — مرده فرض می‌شود
+        if b["dep"] == my_deploy:
+            mine.append(b)
+        else:
+            foreign.append(b)
+    return mine, foreign
+
+
+def _self_sync_failure_hint(sync_err):
+    """وقتی سلف بالا نمی‌آید، در محیط میزبان محتمل‌ترین علت را بگو."""
+    if is_hosted():
+        return ("\n\n<b>🔸 روی Railway هستی؟ این خطا یعنی همین سرویس نسخه‌ی "
+                "قدیمی است.</b>\n"
+                "۱) در داشبورد Railway این سرویس را Remove/Redeploy کن و "
+                "مطمئن شو فقط یک سرویس از این ربات روشن است.\n"
+                "۲) دو سرویسِ هم‌زمان با یک توکن، آپدیت‌ها را نصف‌ونیمه "
+                "می‌گیرند؛ سرویس قدیمی را خاموش کن.")
+    return ""
+
 
 # ── نشست ذخیره‌شده ربات مدیر (جلوگیری از ImportBotAuthorization در هر بوت) ──
 BOT_SESSION_FILE = os.path.join(BASE_DIR, "manager_bot.string")
@@ -1868,7 +2002,8 @@ class Supervisor:
         ok_sync, sync_err = self.sync_selfbot(uid)
         if not ok_sync:
             self.last_failure[uid] = "manager"
-            return False, "به‌روزرسانی فایل سلف نشد: " + sync_err + " · " + build_stamp()
+            return False, ("به‌روزرسانی فایل سلف نشد: " + sync_err + " · "
+                           + build_stamp() + _self_sync_failure_hint(sync_err))
         logf = open(os.path.join(folder, "run.log"), "a", encoding="utf-8")
         logf.write(f"\n===== start {datetime.now():%Y-%m-%d %H:%M:%S} =====\n")
         logf.flush()
@@ -5566,6 +5701,121 @@ class Manager:
                 print("points_loop:", e)
             await asyncio.sleep(300)
 
+    async def duplicate_watch_loop(self):
+        """تشخیص «نسخه‌ی دیگری از همین ربات هم‌زمان روشنه».
+
+        هر دقیقه یک پیام ضربان در چت مدیر edit می‌کند و ضربانِ تازه‌ی نمونه‌های
+        دیگر (DEPLOY_ID متفاوت) را می‌خواند. اگر همان نمونه‌ی غریبه در دو اسکن
+        پیاپی ضربانش تازه مانده باشد (یعنی ری‌استارت/دیپلویِ سالم نیست و واقعاً
+        یک سرویس دوم زنده است)، هشدار می‌دهد: همان ریشه‌ی «فایل 95.py پیدا
+        نشد» و «ریل‌وی قدیمی هنوز روشنه».
+        """
+        try:
+            me = await self.bot.get_me()
+            bot_id = getattr(me, "id", 0) or 0
+        except Exception:
+            bot_id = 0
+        # chat -> آخرین پیام ضربان خودمان (برای edit به‌جای اسپم)
+        my_beacon = {}
+        # dep غریبه -> اسکن‌های پیاپی‌ای که زنده دیده شده
+        seen = {}
+        last_alert = 0.0
+        alerts_sent = 0
+        MAX_ALERTS = 4
+        ALERT_EVERY = 900        # بین هشدارها حداقل ۱۵ دقیقه
+        while True:
+            try:
+                foreign_live = []
+                for a in self.cfg.get("admin_ids") or []:
+                    try:
+                        msgs = await self.bot.get_messages(a, limit=25)
+                    except Exception:
+                        continue
+                    parsed = []
+                    stale_own = []
+                    for m in msgs:
+                        try:
+                            txt = m.message or ""
+                        except Exception:
+                            continue
+                        b = parse_beacon(txt)
+                        if not b:
+                            continue
+                        try:
+                            ets = int((m.edit_date or m.date).timestamp())
+                        except Exception:
+                            ets = b["ts"]
+                        parsed.append({"text": txt, "edit_ts": ets})
+                        # ضربانِ مرده‌ی خودمان (از ری‌استارت قبل) را پاک کن
+                        if b["dep"] == DEPLOY_ID and int(time.time()) - ets > 1800:
+                            stale_own.append(m)
+                    for m in stale_own:
+                        try:
+                            await m.delete()
+                        except Exception:
+                            pass
+                    mine, foreign = scan_beacons(parsed)
+                    foreign_live.extend(foreign)
+                    # ── ضربان خودمان: edit کن، وگرنه تازه بفرست ──
+                    existing = None
+                    for m in msgs:
+                        b = parse_beacon(getattr(m, "message", "") or "")
+                        if b and b["dep"] == DEPLOY_ID:
+                            existing = m
+                            break
+                    try:
+                        if existing is not None:
+                            await self.bot.edit_message(a, existing, beacon_text())
+                            my_beacon[a] = existing.id
+                        else:
+                            sent = await self.bot.send_message(a, beacon_text())
+                            my_beacon[a] = getattr(sent, "id", None)
+                    except Exception as e:
+                        print("beacon:", type(e).__name__, e)
+
+                # ── تصمیم هشدار: غریبه باید در دو اسکن پیاپی زنده باشد ──
+                deps_now = {b["dep"]: b for b in foreign_live}
+                confirmed = {}
+                for dep, b in list(deps_now.items()):
+                    seen[dep] = seen.get(dep, 0) + 1
+                    if seen[dep] >= 2:
+                        confirmed[dep] = b
+                for dep in list(seen):
+                    if dep not in deps_now:
+                        seen.pop(dep, None)
+
+                if confirmed and alerts_sent < MAX_ALERTS \
+                        and time.time() - last_alert > ALERT_EVERY:
+                    last_alert = time.time()
+                    alerts_sent += 1
+                    lines = ["⚠️ <b>نسخه‌ی دیگری از همین ربات هم‌زمان روشن است!</b>",
+                             "",
+                             "چند سرویس/دیپلوی با یک توکن به تلگرام وصل‌اند؛ "
+                             "تلگرام پیام‌ها و دکمه‌ها را بینشان پخش می‌کند. "
+                             "به همین خاطر است که گاهی «فایل 95.py پیدا نشد» "
+                             "می‌آید و ریل‌وی قدیمی هنوز پاسخ می‌دهد.",
+                             "",
+                             f"نمونه‌ی خودت: <code>{INSTANCE_ID}</code> · "
+                             f"<code>{BUILD_VERSION}</code> · {HOST_LABEL}",
+                             "نمونه(های) دیگر:"]
+                    for b in list(confirmed.values())[:4]:
+                        lines.append(f"  • <code>{b['build']}</code> — {b['host']}")
+                    lines += ["",
+                              "🔧 راه حل: برو داشبورد Railway و سرویس‌های "
+                              "اضافی/قدیمی را <b>Remove</b> کن (یا دیپلوی "
+                              "قدیمی را خاموش کن)؛ فقط یک سرویس باید بماند. "
+                              "بعد روی همین سرویس Redeploy بزن."]
+                    for a in self.cfg.get("admin_ids") or []:
+                        try:
+                            await self.bot.send_message(a, "\n".join(lines),
+                                                        parse_mode="html",
+                                                        link_preview=False)
+                        except Exception:
+                            pass
+            except Exception as e:
+                print("duplicate_watch:", e)
+            await asyncio.sleep(60)
+
     async def reminder_loop(self):
         """یادآوری تمدید چند روز قبل از انقضا."""
         sent = set()
@@ -6332,6 +6582,7 @@ class Manager:
         print(f"{'='*54}\n")
 
         threading.Thread(target=self.sup.watchdog, daemon=True).start()
+        asyncio.create_task(self.duplicate_watch_loop())
         asyncio.create_task(self.reminder_loop())
         asyncio.create_task(self.points_loop())
         asyncio.create_task(self.trial_loop())
@@ -6751,8 +7002,13 @@ class Manager:
                     pass
 
         for a in c["admin_ids"]:
-            await self.say(a, "🟢 <b>ربات مدیر بالا آمد</b>",
-                           [[B("🛠 پنل مدیر", "a:home", "primary")]])
+            await self.say(
+                a,
+                "🟢 <b>ربات مدیر بالا آمد</b>\n"
+                f"<i>نسخه {BUILD_VERSION} · نمونه {INSTANCE_ID} · {HOST_LABEL}</i>\n"
+                "اگر دو پیام «بالا آمد» با نمونه‌های متفاوت می‌بینی، یعنی یک "
+                "سرویس قدیمیِ Railway هنوز روشن است — همان را خاموش کن.",
+                [[B("🛠 پنل مدیر", "a:home", "primary")]])
         if not c["admin_ids"]:
             print("  ⏳ منتظر اولین /start …\n", flush=True)
 
