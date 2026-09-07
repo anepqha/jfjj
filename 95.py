@@ -106,7 +106,14 @@ DEFAULTS = {
         "msg_wait": "",
         "msg_nolink": "",
         "msg_come": "",
-        "come_delay_sec": 0,         # تأخیر پیام «بیا» بعد از جوین
+        "come_delay_sec": 0,         # تأخیر پیام «بیا» بعد از جوین (سازگاری)
+        "come_min_sec": 34,          # بازه‌ی تصادفی تأخیر «بیا» بعد از جوینِ ربات
+        "come_max_sec": 35,          # (پیش‌فرض: ۳۴–۳۵ ثانیه؛ هرگز ۰/درجا)
+        "response_delay_sec": 15,    # تأخیر پاسخ بعد از Join واقعی (سازگاری)
+        "response_min_sec": 11,      # بازه‌ی تصادفی پاسخ موفق «جوین شدم» روی پیام طرف
+        "response_max_sec": 48,      # (پیش‌فرض: ۱۱–۴۸ ثانیه)
+        "reply_min_sec": 5,          # بازه‌ی تصادفی تأخیر پاسخ‌های مستقیم رویداد
+        "reply_max_sec": 18,         # (عضو نیست/صبر کن/کانالت پیدا نشد؛ ۵–۱۸ ثانیه)
         "reminder_min_sec": 5,       # فاصله کمینه یادآوری عضو‌نشده
         "reminder_max_sec": 15,      # فاصله بیشینه یادآوری عضو‌نشده
         # برای جلوگیری از مزاحمت، پیش‌فرض فقط یک پیام «عضو نیست» است.
@@ -2021,6 +2028,7 @@ class Engine:
             ("پیام بیا", "come"),
             ("پیام", "come"),
             ("زمان بیا", "cometime"),
+            ("زمان جواب", "replytime"),
             ("سقف روزانه", "maxday"),
             ("سقف ساعتی", "hourcap"),
             ("سقف هر ساعت", "hourcap"),
@@ -2100,6 +2108,8 @@ class Engine:
             "خلاصه": "report_now",
             "فاصله تبادل": "gap", "زمان تبادل": "gap",
             "بیا": "come", "پیام بیا": "come", "زمان بیا": "cometime",
+            "زمان جواب": "replytime", "زمان پاسخ مستقیم": "replytime",
+            "replytime": "replytime", "reply_time": "replytime", "reply_delay": "replytime",
         }
         sub = ex_aliases.get(sub, sub)
         if sub == "check":
@@ -2191,15 +2201,61 @@ class Engine:
 
         if sub in ("cometime", "come_time"):
             if not rest:
-                return (f"تأخیر پیام بعد از جوین: {fa(x.get('come_delay_sec', 0))} ثانیه\n"
-                        "`تبادل زمان بیا ۰` = فوری")
+                lo = int(x.get("come_min_sec", 34) or 34)
+                hi = int(x.get("come_max_sec", 35) or 35)
+                lo, hi = max(1, lo), max(lo, hi)
+                shown = (f"{fa(lo)} ثانیه"
+                         if lo == hi else f"تصادفی بین {fa(lo)} تا {fa(hi)} ثانیه")
+                return (f"تأخیر پیام «بیا» بعد از جوین: {shown}\n"
+                        "`تبادل زمان بیا ۳۴ ۳۵` (هر دو عدد = بازه)  |  "
+                        "`تبادل زمان بیا ۴۰` (یک عدد = ثابت)")
+            rest = re.sub(r"\s*(?:ثانیه|ثانیه‌ای)\s*$", "", rest).strip()
             try:
-                v = max(0, min(3600, num(rest)))
-            except ValueError:
-                return "عدد بده: `تبادل زمان بیا ۰`"
-            x["come_delay_sec"] = v
+                ns = [num(v) for v in rest.split()]
+                if len(ns) == 1:
+                    v = max(1, min(3600, ns[0]))
+                    lo, hi = v, v
+                else:
+                    lo = max(1, min(3600, ns[0]))
+                    hi = max(lo, min(3600, ns[1]))
+            except (ValueError, IndexError):
+                return "فرمت: `تبادل زمان بیا ۳۴ ۳۵` (بازه) یا `تبادل زمان بیا ۴۰` (ثابت)"
+            x["come_min_sec"] = lo
+            x["come_max_sec"] = hi
+            # سازگاری با تنظیم‌های قدیم: اگر بازه ۰ نبود، کلید قدیمی هم
+            # روی مقدار وسط ست می‌شود تا گزارش‌های قدیمی اشتباه نکنند.
+            x["come_delay_sec"] = (lo if lo == hi else (lo + hi) // 2)
             self.st.save()
-            return f"⏱ تأخیر پیام «بیا»: **{fa(v)} ثانیه**"
+            shown = (f"{fa(lo)} ثانیه"
+                     if lo == hi else f"تصادفی بین {fa(lo)} تا {fa(hi)} ثانیه")
+            return f"⏱ تأخیر پیام «بیا»: **{shown}**"
+
+        if sub in ("replytime", "reply_time", "reply_delay"):
+            if not rest:
+                lo = int(x.get("reply_min_sec", 5) or 5)
+                hi = int(x.get("reply_max_sec", 18) or 18)
+                lo, hi = max(1, lo), max(lo, hi)
+                shown = (f"{fa(lo)} ثانیه"
+                         if lo == hi else f"تصادفی بین {fa(lo)} تا {fa(hi)} ثانیه")
+                return (f"تأخیر پاسخ‌های مستقیم (عضو نیست/صبر کن/کانالت): {shown}\n"
+                        "`تبادل زمان جواب ۵ ۱۸` (بازه)  |  `تبادل زمان جواب ۱۰` (ثابت)")
+            rest = re.sub(r"\s*(?:ثانیه|ثانیه‌ای)\s*$", "", rest).strip()
+            try:
+                ns = [num(v) for v in rest.split()]
+                if len(ns) == 1:
+                    v = max(1, min(3600, ns[0]))
+                    lo, hi = v, v
+                else:
+                    lo = max(1, min(3600, ns[0]))
+                    hi = max(lo, min(3600, ns[1]))
+            except (ValueError, IndexError):
+                return "فرمت: `تبادل زمان جواب ۵ ۱۸`"
+            x["reply_min_sec"] = lo
+            x["reply_max_sec"] = hi
+            self.st.save()
+            shown = (f"{fa(lo)} ثانیه"
+                     if lo == hi else f"تصادفی بین {fa(lo)} تا {fa(hi)} ثانیه")
+            return f"⏱ تأخیر پاسخ‌های مستقیم: **{shown}**"
 
         if sub in ("msgok", "msgno", "msgwait", "msgnolink", "msgfirst"):
             key = {"msgok": "msg_ok", "msgno": "msg_no", "msgwait": "msg_wait",
@@ -2412,16 +2468,35 @@ class Engine:
 
         if sub == "response_delay":
             if not rest:
-                return (f"تأخیر پاسخ بعد از Join: {fa(x.get('response_delay_sec', 15))} ثانیه\n"
-                        "`تبادل زمان پاسخ 15`")
+                if "response_min_sec" in x or "response_max_sec" in x:
+                    lo = int(x.get("response_min_sec", 11) or 11)
+                    hi = int(x.get("response_max_sec", 48) or 48)
+                    lo, hi = max(0, lo), max(lo, hi)
+                    shown = (f"{fa(lo)} ثانیه"
+                             if lo == hi else f"تصادفی بین {fa(lo)} تا {fa(hi)} ثانیه")
+                else:
+                    shown = f"{fa(int(x.get('response_delay_sec', 15) or 15))} ثانیه"
+                return (f"تأخیر پاسخ بعد از Join: {shown}\n"
+                        "`تبادل زمان پاسخ ۱۱ ۴۸` (بازه)  |  `تبادل زمان پاسخ 15` (ثابت)")
             rest = re.sub(r"\s*(?:ثانیه|ثانیه‌ای)\s*$", "", rest).strip()
             try:
-                v = max(0, min(3600, num(rest)))
-            except ValueError:
-                return "عدد بده: `تبادل زمان پاسخ 15`"
-            x["response_delay_sec"] = v
+                ns = [num(v) for v in rest.split()]
+                if len(ns) == 1:
+                    v = max(0, min(3600, ns[0]))
+                    lo, hi = v, v
+                else:
+                    lo = max(0, min(3600, ns[0]))
+                    hi = max(lo, min(3600, ns[1]))
+            except (ValueError, IndexError):
+                return "فرمت: `تبادل زمان پاسخ ۱۱ ۴۸` یا `تبادل زمان پاسخ 15`"
+            x["response_min_sec"] = lo
+            x["response_max_sec"] = hi
+            # سازگاری: کلید قدیمی هم به‌روزرسانی شود.
+            x["response_delay_sec"] = (lo if lo == hi else (lo + hi) // 2)
             self.st.save()
-            return f"⏱ تأخیر پاسخ: **{fa(v)} ثانیه**"
+            shown = (f"{fa(lo)} ثانیه"
+                     if lo == hi else f"تصادفی بین {fa(lo)} تا {fa(hi)} ثانیه")
+            return f"⏱ تأخیر پاسخ: **{shown}**"
 
         if sub == "maxday":
             x["max_joins_per_day"] = 0
@@ -4261,7 +4336,7 @@ async def connect_and_run(eng, creds):
         if not chat or not mid:
             return False
         if outgoing:
-            delay = max(0, min(3600, int(eng.ex_cfg().get("come_delay_sec", 0) or 0)))
+            delay = come_delay_seconds()
         else:
             delay = response_delay_seconds()
         if delay:
@@ -4295,12 +4370,55 @@ async def connect_and_run(eng, creds):
         return random.randint(lo, hi)
 
     def response_delay_seconds():
-        """تأخیر پاسخ موفق؛ صفر باید واقعاً صفر بماند."""
-        v = eng.ex_cfg().get("response_delay_sec")
+        """تأخیر تصادفی پاسخ موفق «جوین شدم» روی پیام طرف.
+
+        بازه‌ی پیش‌فرض: ۱۱–۴۸ ثانیه (response_min_sec/response_max_sec).
+        اگر فقط کلید قدیمی response_delay_sec موجود باشد، به‌عنوان بازه‌ی
+        ثابت (min=max) تفسیر می‌شود تا سازگاری با تنظیم‌های قدیم حفظ شود.
+        صفر بودنِ مقدار به معنای «پاسخ فوری» است و واقعاً صفر می‌ماند.
+        """
+        x = eng.ex_cfg()
+        if "response_min_sec" in x or "response_max_sec" in x:
+            lo = int(x.get("response_min_sec") or 0)
+            hi = int(x.get("response_max_sec") or lo)
+            if lo == 0 and hi == 0:
+                return 0
+            lo, hi = max(0, lo), max(lo, hi)
+            if lo == hi:
+                return max(0, min(3600, lo))
+            return random.randint(lo, hi)
+        # ── سازگاری با کلید قدیمی response_delay_sec ──
+        v = x.get("response_delay_sec")
         try:
             return max(0, min(3600, int(15 if v is None else v)))
         except (TypeError, ValueError):
             return 15
+
+    def come_delay_seconds():
+        """تأخیر تصادفی پیام «بیا» بعد از جوینِ خود ربات (out direction).
+
+        بازه‌ی پیش‌فرض: ۳۴–۳۵ ثانیه. هرگز ۰ نیست تا الگوی ربات ماشینی نشود.
+        """
+        x = eng.ex_cfg()
+        lo = int(x.get("come_min_sec", 34) or 34)
+        hi = int(x.get("come_max_sec", 35) or 35)
+        lo, hi = max(1, lo), max(lo, hi)
+        if lo == hi:
+            return max(1, min(3600, lo))
+        return random.randint(lo, hi)
+
+    def reply_delay_seconds():
+        """تأخیر تصادفی پاسخ‌های مستقیم رویداد (msg_no/msg_wait/msg_nolink).
+
+        بازه‌ی پیش‌فرض: ۵–۱۸ ثانیه. هر پاسخ برای هر شخص فقط یک‌بار.
+        """
+        x = eng.ex_cfg()
+        lo = int(x.get("reply_min_sec", 5) or 5)
+        hi = int(x.get("reply_max_sec", 18) or 18)
+        lo, hi = max(1, lo), max(lo, hi)
+        if lo == hi:
+            return max(1, min(3600, lo))
+        return random.randint(lo, hi)
 
     async def send_not_joined_reminder(rec):
         """متن msg_no را فقط در سقف تنظیم‌شده روی پیام اصلی می‌فرستد؛
@@ -4428,16 +4546,13 @@ async def connect_and_run(eng, creds):
         if event.is_private:
             pass
         else:
-            chat = await event.get_chat()
-            uname = (getattr(chat, "username", "") or "").lower()
-            cid = str(getattr(chat, "id", ""))
-            allowed = any(g.strip().lstrip("@").lower() in (uname, cid)
-                          for g in x["groups"])
-            # ریپلای به پیام خود جفج همیشه درخواست تبادل محسوب می‌شود؛
-            # حتی اگر آن گروه قبلاً در فهرست ثبت نشده باشد.
-            if not replied_to_me and not (allowed and
-                                          (getattr(event, "mentioned", False) or claim
-                                           or bool(extract_links(body_text)))):
+            # دروازه‌ی گروه: فقط زمانی پاسخ بده که پیام یا reply به ربات باشد
+            # (replied_to_me) یا ربات را mention کرده باشد (event.mentioned).
+            # این کار جلوی «پنل باز نمی‌شود» و پاسخ‌های تصادفی به
+            # پیام‌های «جوین شدم» مردم به همدیگر را می‌گیرد.
+            # لینک‌های عمومی گروه‌های ثبت‌شده از مسیر scan_groups (پیش‌قدم)
+            # پردازش می‌شوند و اینجا تغییری نمی‌کنند.
+            if not replied_to_me and not getattr(event, "mentioned", False):
                 return
 
         # ریپلای خالی/نامرتبط به پیام جفج را هم پردازش نکن؛ فقط ادعای Join
@@ -4472,9 +4587,21 @@ async def connect_and_run(eng, creds):
             # اگر کاربر متنی ثبت نکرد، هیچ پیام خودکاری ارسال نشود.
             if not t:
                 return False
+            # پاسخ‌های مستقیم رویداد (msg_no/msg_wait/msg_nolink) قبل از
+            # ارسال یک تأخیر انسانی ۵–۱۸ ثانیه می‌گیرند تا شکل رباتی نداشته باشد.
+            # پیام موفق (msg_ok/msg_come) مسیر خودش را دارد (reply_joined با
+            # بازه‌ی ۱۱–۴۸ ثانیه) و از این تأخیر عبور نمی‌کند.
+            if key in ("msg_no", "msg_wait", "msg_nolink"):
+                await asyncio.sleep(reply_delay_seconds())
             try:
                 await event.reply(t)
                 eng.log("info", "ex_reply_attempt", f"{sender_name} [{used}]")
+                # پرچم replied=1 تا همین پیام دوباره ارسال نشود (هر شخص فقط یک بار)
+                # برای پیام‌های مستقیم رویداد ضروری است.
+                if key in ("msg_no", "msg_wait", "msg_nolink"):
+                    rec_after = eng.db.ex_get(rec["id"]) if rec and rec.get("id") else None
+                    if rec_after:
+                        eng.db.ex_set(rec_after["id"], replied=1)
                 return True
             except Exception as e:
                 eng.log("warn", "ex_reply", f"{sender_name}: {type(e).__name__}: {e}")
