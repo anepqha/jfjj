@@ -111,6 +111,42 @@ def scenario_hint_on_hosted():
     assert ok
 
 
+def scenario_legacy_zombie_detected():
+    print("--- 8: old-code zombie (no beacon) spotted by foreign activity ---")
+    now = int(time.time())
+    BOT = 1111
+    # پیامی که ربات فرستاده ولی این نمونه نفرستاده، تازه، بعد از بوت => بیگانه
+    msgs = [
+        {"id": 1, "sender_id": BOT, "text": "✅ سرویس روشن شد (pid 42)", "ts": now - 20},
+        {"id": 2, "sender_id": BOT, "text": f"#JAFJBEACON i=zz d={M.DEPLOY_ID} b=xx h=xx t={now}", "ts": now - 10},
+        # پیامِ خودمان (در _sent_ids) نباید شمرده شود
+        {"id": 3, "sender_id": BOT, "text": "پنل مدیر", "ts": now - 5},
+        # پیام کاربر (فرستنده غیر ربات) نباید شمرده شود
+        {"id": 4, "sender_id": 999, "text": "سلام", "ts": now - 5},
+        # پیام قدیمیِ ربات (قبل از بوت، از دیپلوی قبلی) نباید شمرده شود
+        {"id": 5, "sender_id": BOT, "text": "بالا آمد", "ts": now - 7200},
+    ]
+    boot = now - 300
+    hits = M.count_legacy_foreign(msgs, BOT, sent_ids={3}, live_ids={3},
+                                  boot_at=boot, now_ts=now)
+    ok = hits == 1, hits
+    print("legacy_hits=%d (expected 1)" % hits)
+    print("scenario8:", "PASS" if hits == 1 else "FAIL")
+    assert hits == 1
+
+
+def scenario_legacy_fresh_messages_only():
+    print("--- 9: bot messages older than window are not counted ---")
+    now = int(time.time())
+    BOT = 1111
+    msgs = [{"id": 1, "sender_id": BOT, "text": "روشن شد", "ts": now - 900}]
+    hits = M.count_legacy_foreign(msgs, BOT, sent_ids=set(), live_ids=set(),
+                                  boot_at=now - 3600, now_ts=now)
+    print("legacy_hits=%d (expected 0)" % hits)
+    print("scenario9:", "PASS" if hits == 0 else "FAIL")
+    assert hits == 0
+
+
 if __name__ == "__main__":
     scenario_own_beacon_recognized()
     scenario_foreign_beacon_detected()
@@ -119,4 +155,6 @@ if __name__ == "__main__":
     scenario_plain_format_beacon()
     scenario_deploy_id_stable_across_imports()
     scenario_hint_on_hosted()
+    scenario_legacy_zombie_detected()
+    scenario_legacy_fresh_messages_only()
     print("ALL: PASS")

@@ -1148,8 +1148,8 @@ BOT_TOKEN = "8789173370:AAFldI-budd0hsXlVRnOlLndl3e5wOeb5aU"
 API_ID = 28039994
 API_HASH = "00877cdcd706564a4de6abf7f7d64349"
 ADMIN_IDS = [8287266200]
-BUILD_VERSION = "v0907-railway"
-BUILD_TAG = "JAFJ_MANAGER_82_v0907-railway_2026_09_07"
+BUILD_VERSION = "v0908-railway"
+BUILD_TAG = "JAFJ_MANAGER_82_v0908-railway_2026_09_07"
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  شناسه‌ی نمونه (instance) + تشخیص «سرویس قدیمی هنوز روشنه»
@@ -1271,6 +1271,40 @@ def scan_beacons(messages, my_deploy=None, window_sec=170, now_ts=None):
         else:
             foreign.append(b)
     return mine, foreign
+
+
+def count_legacy_foreign(msgs, bot_id, sent_ids, live_ids, boot_at,
+                         window_sec=170, now_ts=None):
+    """پیام‌هایِ نسخه‌ی زامبیِ قدیمی (که ضربان ندارد) را می‌شمارد.
+
+    «بیگانه» یعنی: فرستنده خودِ ربات است ولی این نمونه نفرستاده/ویرایشش نکرده،
+    متن دارد، تازه است (در window_sec ثانیه‌ی اخیر) و مربوط به قبل از بوت این
+    نمونه نیست. خالص است تا بدون تلگرام تست شود.
+
+    ورودی msgs: لیستی از دیکشنری {"id", "sender_id", "text", "ts" (epoch)}
+    """
+    now_ts = int(now_ts if now_ts is not None else time.time())
+    sent_ids = set(sent_ids or ())
+    live_ids = set(live_ids or ())
+    hits = 0
+    for m in msgs:
+        try:
+            if not bot_id or int(m.get("sender_id", 0)) != bot_id:
+                continue
+            txt = (m.get("text") or "").strip()
+            if not txt or parse_beacon(txt):
+                continue
+            mts = int(m.get("ts", 0))
+            if now_ts - mts > window_sec:
+                continue
+            if mts < int(boot_at) - 5:
+                continue
+            if m.get("id") in sent_ids or m.get("id") in live_ids:
+                continue
+            hits += 1
+        except Exception:
+            continue
+    return hits
 
 
 def _self_sync_failure_hint(sync_err):
@@ -2353,6 +2387,7 @@ class Manager:
         self.shop = Shop()
         self._receipts = {}
         self._live = set()      # آیدی پیام‌هایی که همین نشست ساخته‌ایم
+        self._sent_ids = set()  # همه‌ی پیام‌های فرستاده‌ی این نمونه (تشخیص زامبی)
         self.boot_at = now()    # زمان بالا آمدن
         self.fsm = {}            # uid -> {"step":..., "client":..., "phone":...}
         self.bot = None
@@ -5719,6 +5754,8 @@ class Manager:
         my_beacon = {}
         # dep غریبه -> اسکن‌های پیاپی‌ای که زنده دیده شده
         seen = {}
+        # ردِ فعالیتِ بیگانه‌ی نسخه‌ی قدیمی (که ضربان ندارد)
+        legacy_seen = 0
         last_alert = 0.0
         alerts_sent = 0
         MAX_ALERTS = 4
@@ -5726,6 +5763,7 @@ class Manager:
         while True:
             try:
                 foreign_live = []
+                legacy_hits = 0
                 for a in self.cfg.get("admin_ids") or []:
                     try:
                         msgs = await self.bot.get_messages(a, limit=25)
@@ -5733,11 +5771,21 @@ class Manager:
                         continue
                     parsed = []
                     stale_own = []
+                    raw = []
                     for m in msgs:
                         try:
                             txt = m.message or ""
                         except Exception:
                             continue
+                        try:
+                            raw.append({
+                                "id": m.id,
+                                "sender_id": getattr(m, "sender_id", 0) or 0,
+                                "text": txt,
+                                "ts": int((m.edit_date or m.date).timestamp()),
+                            })
+                        except Exception:
+                            pass
                         b = parse_beacon(txt)
                         if not b:
                             continue
@@ -5756,6 +5804,9 @@ class Manager:
                             pass
                     mine, foreign = scan_beacons(parsed)
                     foreign_live.extend(foreign)
+                    # ── نسخه‌ی قدیمیِ زامبی (ضربان ندارد) از روی فعالیتش ──
+                    legacy_hits += count_legacy_foreign(
+                        raw, bot_id, self._sent_ids, self._live, self.boot_at)
                     # ── ضربان خودمان: edit کن، وگرنه تازه بفرست ──
                     existing = None
                     for m in msgs:
@@ -5784,7 +5835,15 @@ class Manager:
                     if dep not in deps_now:
                         seen.pop(dep, None)
 
-                if confirmed and alerts_sent < MAX_ALERTS \
+                # نسخه‌ی قدیمی هم اگر دو اسکن پیاپی پیامِ تازه‌ی بیگانه داشته
+                # باشد، زنده است (روی ۳ دقیقه اخیر دیده شود، بعد صفر می‌شود).
+                if legacy_hits:
+                    legacy_seen += 1
+                else:
+                    legacy_seen = 0
+                legacy_confirmed = legacy_seen >= 2
+
+                if (confirmed or legacy_confirmed) and alerts_sent < MAX_ALERTS \
                         and time.time() - last_alert > ALERT_EVERY:
                     last_alert = time.time()
                     alerts_sent += 1
@@ -5796,15 +5855,30 @@ class Manager:
                              "می‌آید و ریل‌وی قدیمی هنوز پاسخ می‌دهد.",
                              "",
                              f"نمونه‌ی خودت: <code>{INSTANCE_ID}</code> · "
-                             f"<code>{BUILD_VERSION}</code> · {HOST_LABEL}",
-                             "نمونه(های) دیگر:"]
-                    for b in list(confirmed.values())[:4]:
-                        lines.append(f"  • <code>{b['build']}</code> — {b['host']}")
-                    lines += ["",
-                              "🔧 راه حل: برو داشبورد Railway و سرویس‌های "
-                              "اضافی/قدیمی را <b>Remove</b> کن (یا دیپلوی "
-                              "قدیمی را خاموش کن)؛ فقط یک سرویس باید بماند. "
-                              "بعد روی همین سرویس Redeploy بزن."]
+                             f"<code>{BUILD_VERSION}</code> · {HOST_LABEL}"]
+                    if confirmed:
+                        lines.append("نمونه(های) دارای ضربان:")
+                        for b in list(confirmed.values())[:4]:
+                            lines.append(f"  • <code>{b['build']}</code> — {b['host']}")
+                    if legacy_confirmed:
+                        lines.append("+ یک نمونه‌ی نسخه‌ی قدیمی هم دارد پیام "
+                                     "می‌فرستد (ضربان ندارد — احتمالاً همان "
+                                     "سرویس Railway که به حسابش دسترسی نداری).")
+                    lines += [
+                        "",
+                        "🔧 <b>اگر به سرویس قدیمی دسترسی داری:</b> توی داشبورد "
+                        "Railway سرویس اضافی را <b>Remove</b> کن؛ فقط یک سرویس "
+                        "بماند و اینجا Redeploy بزن.",
+                        "",
+                        "🔑 <b>اگر دسترسی نداری (حسابش پریده):</b> توکن ربات "
+                        "را عوض کن تا سرویس قدیمی کور شود:",
+                        "۱) در تلگرام به <b>@BotFather</b> برو → <code>/mybots</code> "
+                        "→ رباتت → <b>API Token</b> → <b>Revoke current token</b>",
+                        "۲) توکن جدید را در متغیرهای محیطی همین سرویس بگذار "
+                        "(<code>BOT_TOKEN</code>) و Redeploy بزن (یا فایل "
+                        "manager_config.json را به‌روز کن).",
+                        "۳) فایل <code>manager_bot.string</code> لازم نیست "
+                        "دست بزنی؛ خودش با توکن جدید دوباره ساخته می‌شود."]
                     for a in self.cfg.get("admin_ids") or []:
                         try:
                             await self.bot.send_message(a, "\n".join(lines),
@@ -6540,6 +6614,33 @@ class Manager:
             print(f"\n⛔ ورود ناموفق پس از تلاش‌ها: {type(e).__name__}: {e}")
             print("   توکن/api یا محدودیت FloodWait را چک کن.\n")
             return 1
+
+        # آیدی هر پیامی که این نمونه می‌فرستد را نگه دار تا نمونه‌ی زامبیِ
+        # هم‌زمان (نسخه‌ی قدیمیِ بی‌ضربان) را از روی فعالیتش تشخیص بدهیم.
+        try:
+            bot_id_track = getattr((await self.bot.get_me()), "id", 0) or 0
+            _orig_send = self.bot.send_message
+
+            def _track(r):
+                try:
+                    self._sent_ids.add(getattr(r, "id", 0))
+                    if len(self._sent_ids) > 4000:
+                        self._sent_ids = set(sorted(self._sent_ids)[-2000:])
+                except Exception:
+                    pass
+                return r
+
+            async def _tracking_send(chat, *a, **k):
+                return _track(await _orig_send(chat, *a, **k))
+            self.bot.send_message = _tracking_send
+
+            _orig_edit = getattr(self.bot, "edit_message", None)
+            if _orig_edit is not None:
+                async def _tracking_edit(*a, **k):
+                    return _track(await _orig_edit(*a, **k))
+                self.bot.edit_message = _tracking_edit
+        except Exception:
+            bot_id_track = 0
 
         # فایل نشست قدیمی اگر مانده، پاکش کن (نسخه .string جایگزین شده)
         for junk in ("manager_bot.session", "manager_bot.session-journal"):
