@@ -3765,9 +3765,28 @@ async def connect_and_run(eng, creds):
     print("═" * 50)
     print("  ✅ آماده — در Saved Messages بفرست: پنل\n")
 
+    # ── ضدحلقه ──
+    # شناسه‌ی پیام‌هایی که خودِ ربات به Saved Messages فرستاده. هندلرِ «me»
+    # حالا outgoing را هم می‌شنود (فرمانِ کاربر از گوشی‌اش هم out=True
+    # می‌آید)، پس فقط راهِ تشخیص «پاسخِ خودِ ربات» از «فرمانِ کاربر»،
+    # نگه‌داشتن شناسه‌ی ارسال‌های خودِ ربات است.
+    own_msg_ids = {}
+
+    def _track_own(msg):
+        try:
+            own_msg_ids[int(getattr(msg, "id", 0) or 0)] = time.time()
+        except Exception:
+            pass
+        if len(own_msg_ids) > 800:
+            cutoff = time.time() - 900
+            for k in [k for k, v in own_msg_ids.items() if v < cutoff]:
+                own_msg_ids.pop(k, None)
+            while len(own_msg_ids) > 800:
+                own_msg_ids.pop(next(iter(own_msg_ids)))
+
     async def note(text):
         try:
-            await client.send_message("me", text, link_preview=False)
+            _track_own(await client.send_message("me", text, link_preview=False))
         except Exception:
             pass
 
@@ -3807,7 +3826,7 @@ async def connect_and_run(eng, creds):
 
         q = arg if not reply_text else f"{arg}\n\n--- متن ریپلای‌شده ---\n{reply_text}"
         try:
-            await event.reply("🧠 …")
+            _track_own(await event.reply("🧠 …"))
         except Exception:
             pass
         out, err = await a.ask(q, eng.ai_context())
@@ -3845,13 +3864,14 @@ async def connect_and_run(eng, creds):
         # همیشه به Saved Messages (me) برمی‌گردد تا پاسخ، مستقل از محلِ پیام،
         # حتماً در جایی که ربات کنترلِ آن را دارد دیده شود.
         try:
-            await client.send_message("me", h, parse_mode="html", link_preview=False)
+            _track_own(await client.send_message("me", h, parse_mode="html",
+                                                 link_preview=False))
             return
         except Exception as e:
             eng.log("warn", "say_html", f"{type(e).__name__}: {str(e)[:120]}")
         # اگر HTML رد شد، با متنِ خام تلاش کن.
         try:
-            await client.send_message("me", txt, link_preview=False)
+            _track_own(await client.send_message("me", txt, link_preview=False))
             return
         except Exception as e:
             eng.log("error", "say", f"{type(e).__name__}: {str(e)[:120]}")
@@ -3865,11 +3885,16 @@ async def connect_and_run(eng, creds):
             eng.log("error", "panel", str(e))
         await _say(txt)
 
-    @client.on(events.NewMessage(chats="me", incoming=True))
+    # incoming و outgoing «هر دو»: فرمانِ «پنل» که از گوشیِ خودت می‌فرستی
+    # به این سشن با out=True می‌رسد (همه‌ی پیام‌های Saved Messages از
+    # فرستنده‌ی خودِ اکانت‌اند) و فیلترِ incoming=True قبلی آن را می‌کُشت —
+    # همین دلیلِ «پنل باز نمی‌شود» بود.
+    @client.on(events.NewMessage(chats="me"))
     async def on_saved(event):
-        # فقط پیام‌های دریافتی (که تو می‌فرستی) را پردازش کن؛ پاسخ‌های خودِ
-        # ربات (out) دوباره پردازش نشوند تا حلقه/جمجور پیش نیاید.
-        if getattr(event, "out", False):
+        # روی out فیلتر نمی‌کنیم (فرمانِ کاربر هم out=True است). به‌جایش
+        # پیام‌هایی که خودِ ربات فرستاده را با شناسه‌شان رد می‌کنیم تا
+        # حلقه‌ی «پنل → پاسخ → پاسخِ پاسخ» پیش نیاید.
+        if int(getattr(getattr(event, "message", None), "id", 0) or 0) in own_msg_ids:
             return
         # فرمان پنل قبل از هر مسیر AI/تبادل بررسی می‌شود.
         raw = _norm_cmd(event.raw_text or "")
@@ -4072,9 +4097,9 @@ async def connect_and_run(eng, creds):
             try:
                 chat = await event.get_chat()
                 cid = getattr(chat, "id", None)
-                await event.reply(f"🆔 آیدی این چت: `{cid}`")
+                _track_own(await event.reply(f"🆔 آیدی این چت: `{cid}`"))
             except Exception as e:
-                await event.reply(f"خطا: {type(e).__name__}")
+                _track_own(await event.reply(f"خطا: {type(e).__name__}"))
             return
 
         if cmd.lower() in ("ai", "هوش"):
