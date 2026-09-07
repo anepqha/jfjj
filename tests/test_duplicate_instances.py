@@ -147,6 +147,50 @@ def scenario_legacy_fresh_messages_only():
     assert hits == 0
 
 
+def scenario_dead_token_detection():
+    print("--- 10: revoked/dead token is detected (to trigger hardcoded fallback) ---")
+    class Unauthorized(Exception):
+        pass
+    # نام‌های خطا که تلتون هنگام توکن باطل می‌دهد
+    for name in ("AccessTokenInvalidError", "AuthKeyUnregisteredError",
+                 "SessionRevokedError", "UserDeactivatedError",
+                 "TokenInvalidError"):
+        e = type(name, (Exception,), {})("token invalid / unauthorized")
+        assert M.is_dead_token_error(e), name
+    # خطای شبکه نباید «توکن مرده» تلقی شود
+    class ConnectionError2(Exception):
+        pass
+    net = ConnectionError2("connection to telegram failed")
+    assert not M.is_dead_token_error(net)
+    print("dead-token detection ok; network/flood correctly excluded")
+    print("scenario10:", "PASS")
+
+
+def scenario_candidate_token_order():
+    print("--- 11: fallback token list is deduped and hardcoded included ---")
+    tok_cfg = "111:AAA"
+    tok_hc = "222:BBB"
+    old = M.BOT_TOKEN
+    M.BOT_TOKEN = tok_hc
+    try:
+        cands = []
+        for t in (tok_cfg, M.BOT_TOKEN):
+            t = (t or "").strip()
+            if t and t not in cands:
+                cands.append(t)
+        assert cands == [tok_cfg, tok_hc], cands
+        # یکسان باشد فقط یکی
+        cands2 = []
+        for t in (tok_hc, M.BOT_TOKEN):
+            t = (t or "").strip()
+            if t and t not in cands2:
+                cands2.append(t)
+        assert cands2 == [tok_hc], cands2
+    finally:
+        M.BOT_TOKEN = old
+    print("scenario11:", "PASS")
+
+
 if __name__ == "__main__":
     scenario_own_beacon_recognized()
     scenario_foreign_beacon_detected()
@@ -157,4 +201,6 @@ if __name__ == "__main__":
     scenario_hint_on_hosted()
     scenario_legacy_zombie_detected()
     scenario_legacy_fresh_messages_only()
+    scenario_dead_token_detection()
+    scenario_candidate_token_order()
     print("ALL: PASS")

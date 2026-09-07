@@ -1371,6 +1371,23 @@ def login_retry_wait(round_no, base=20, cap=300):
     return max(5, min(base * n, cap))
 
 
+# خطاهایی که یعنی «توکن مرده/باطل‌شده» است، نه مشکل شبکه. در این حالت به‌جای
+# حلقه‌ی انتظار روی همان توکن، سراغ توکن بعدی (هاردکد داخل ایمیج) می‌رویم — این
+# همان شفای خودکار بعد از Revoke در BotFather است.
+_DEAD_TOKEN_MARKS = (
+    "unauthorized", "auth key", "authkey", "revoked", "invalid",
+    "token", "deactivated", "forbidden", "bot was", "banned")
+
+
+def is_dead_token_error(exc):
+    """True یعنی توکن فعلی معتبر نیست (b/Revoke شده) و باید عوضش کرد."""
+    try:
+        msg = f"{type(exc).__name__} {exc}".lower()
+    except Exception:
+        return False
+    return any(k in msg for k in _DEAD_TOKEN_MARKS)
+
+
 def backup_interval():
     """فاصله پشتیبان خودکار: max(120, BACKUP_EVERY=900)."""
     try:
@@ -6123,57 +6140,110 @@ class Manager:
                 continue
 
             # ── 2) ورود با توکن ──
-            client2 = None
-            try:
-                client2 = TelegramClient(StringSession(), api_id, api_hash)
-                await client2.start(bot_token=token)
-                # ذخیره نشست
+            # لیست توکن‌ها: اول توکن تنظیمات/متغیر محیطی، بعد توکن هاردکد داخل
+            # همین فایل (ایمیج). اگر توکن قبلی در BotFather باطل (Revoke) شده و
+            # توکن جدید در کد آمده ولی توکن کهنه توی manager_config.json یا
+            # متغیر BOT_TOKEN گیر کرده باشد، خودکار سراغ هاردکد می‌رویم.
+            candidates = []
+            for t in (token, BOT_TOKEN):
+                t = (t or "").strip()
+                if t and t not in candidates:
+                    candidates.append(t)
+            for ci, cand in enumerate(candidates):
+                client2 = None
                 try:
-                    s = StringSession.save(client2.session)
-                    if s:
-                        with open(BOT_SESSION_FILE, "w", encoding="utf-8") as f:
-                            f.write(s)
+                    client2 = TelegramClient(StringSession(), api_id, api_hash)
+                    await client2.start(bot_token=cand)
+                    if cand != token:
+                        print("  🔑 توکن تنظیمات معتبر نبود؛ با توکن داخل کد وارد "
+                              "شدم و تنظیمات را به‌روز می‌کنم", flush=True)
                         try:
-                            os.chmod(BOT_SESSION_FILE, 0o600)
+                            self.cfg["bot_token"] = cand
                         except Exception:
                             pass
-                        print(f"  💾 نشست ربات ذخیره شد ({len(s)} حرف)", flush=True)
+                    # نشست ذخیره شود
+                    try:
+                        s = StringSession.save(client2.session)
+                        if s:
+                            with open(BOT_SESSION_FILE, "w", encoding="utf-8") as f:
+                                f.write(s)
+                            try:
+                                os.chmod(BOT_SESSION_FILE, 0o600)
+                            except Exception:
+                                pass
+                            print(f"  💾 نشست ربات ذخیره شد ({len(s)} حرف)", flush=True)
+                    except Exception as e:
+                        print(f"  ⚠️ ذخیره نشست: {type(e).__name__}: {e}", flush=True)
+                    self.bot = client2
+                    return client2
                 except Exception as e:
-                    print(f"  ⚠️ ذخیره نشست: {type(e).__name__}: {e}", flush=True)
-                self.bot = client2
-                return client2
-            except Exception as e:
-                secs = _flood_seconds(e)
-                if secs is not None:
-                    wait = min(max(0, secs), 3600) + 30
-                    print(f"  ⏳ FloodWait روی ورود ({secs}s) — خواب {wait}s (تلاش {attempt}/{tries})", flush=True)
-                    try:
-                        if client2 is not None:
-                            try:
-                                await client2.disconnect()
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-                    await asyncio.sleep(wait)
+                    secs = _flood_seconds(e)
+                    if secs is not None:
+                        wait = min(max(0, secs), 3600) + 30
+                        print(f"  ⏳ FloodWait روی ورود ({secs}s) — خواب {wait}s (تلاش {attempt}/{tries})", flush=True)
+                        try:
+                            if client2 is not None:
+                                try:
+                                    await client2.disconnect()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        await asyncio.sleep(wait)
+                        last_err = e
+                        break
+                    dead = is_dead_token_error(e)
                     last_err = e
-                    continue
-                last_err = e
-                if attempt < tries:
-                    wait = min(10 * attempt, 60)
-                    print(f"  ⚠️ ورود ناموفق ({type(e).__name__}: {e}) — تلاش {attempt}/{tries}، خواب {wait}s", flush=True)
-                    try:
-                        if client2 is not None:
+                    if ci < len(candidates) - 1:
+                        if dead:
+                            print(f"  ⚠️ توکن {ci + 1} باطل است ({type(e).__name__}) — "
+                                  f"توکن بعدی را امتحان می‌کنم", flush=True)
                             try:
-                                await client2.disconnect()
+                                if client2 is not None:
+                                    try:
+                                        await client2.disconnect()
+                                    except Exception:
+                                        pass
                             except Exception:
                                 pass
-                    except Exception:
-                        pass
-                    await asyncio.sleep(wait)
-                    continue
-                print(f"  ⛔ ورود ناموفق پس از {tries} تلاش: {type(e).__name__}: {e}", flush=True)
-                raise
+                            # نشستِ متعلق به توکن باطل را پاک کن تا دوباره استفاده نشود
+                            try:
+                                if os.path.exists(BOT_SESSION_FILE):
+                                    os.remove(BOT_SESSION_FILE)
+                            except Exception:
+                                pass
+                            continue
+                        # توکن بعدی هم هست ولی خطا شبکه‌ای بود؛ صبر کن و کل دور را تکرار کن
+                        wait = min(10 * attempt, 60)
+                        print(f"  ⚠️ ورود ناموفق ({type(e).__name__}: {e}) — خواب {wait}s", flush=True)
+                        try:
+                            if client2 is not None:
+                                try:
+                                    await client2.disconnect()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        await asyncio.sleep(wait)
+                        break
+                    if attempt < tries:
+                        wait = min(10 * attempt, 60)
+                        print(f"  ⚠️ ورود ناموفق ({type(e).__name__}: {e}) — تلاش {attempt}/{tries}، خواب {wait}s", flush=True)
+                        try:
+                            if client2 is not None:
+                                try:
+                                    await client2.disconnect()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        await asyncio.sleep(wait)
+                        break
+                    print(f"  ⛔ ورود ناموفق پس از {tries} تلاش: {type(e).__name__}: {e}", flush=True)
+                    raise
+
+            # اگر از حلقه‌ی کاندیدها بدون return بیرون آمدیم (flood/شبکه/انتظار)،
+            # دور بیرونی (attempt) خودش دوباره تلاش می‌کند.
 
         if last_err is not None:
             raise last_err
