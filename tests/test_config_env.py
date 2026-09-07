@@ -12,7 +12,20 @@ import os, sys, json
 sys.path.insert(0, os.getcwd())
 import manager_82 as M
 c = M.Config()
-print("CFG api_id=%r bot_token=%r api_hash=%r" % (c["api_id"], c["bot_token"], c["api_hash"]))
+
+def _mask(v):
+    # never print real secrets: a value counts as a placeholder only if it
+    # is one of the well-known test tokens; anything else (the hardcoded
+    # production fallback) is reported as its presence + a short prefix.
+    s = str(v)
+    if s in ("FILE_TOKEN_abc", "ENV_TOKEN_123", "FILE_HASH_xyz", "ENV_HASH_456"):
+        return s
+    if s.isdigit():
+        return s            # api_id is not secret
+    return "<set:len=%d,prefix=%r>" % (len(s), s[:3])
+
+print("CFG api_id=%r bot_token=%s api_hash=%s"
+      % (c["api_id"], _mask(c["bot_token"]), _mask(c["api_hash"])))
 """
 
 def reset():

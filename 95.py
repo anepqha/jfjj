@@ -5197,16 +5197,32 @@ async def connect_and_run(eng, creds):
     await note(f"🟢 جفج {VERSION} آنلاین شد — پنل جدید\n\n"
                f"`پنل` داشبورد • `راهنما` راهنما{hint}")
 
+    # خطای اولیه‌ای که باعث ورود به پاک‌سازی شد را نگه می‌داریم؛ اگر لغوِ
+    # بیرونی (CancelledError) بود، در پایان دوباره پرتاب می‌شود تا خاموشی
+    # واقعاً کامل گردد و بی‌جهت بلعیده نشود.
+    _shutdown_exc = None
     try:
         await client.run_until_disconnected()
+    except BaseException as _e:
+        _shutdown_exc = _e
     finally:
         for t in (task, ex_task, scan_task, member_task, report_task, risk_task, st_task):
             t.cancel()
-            try:
-                await t
-            except (asyncio.CancelledError, Exception):
-                pass
+        # دور awaitهای پاک‌سازی فقط except Exception می‌گذاریم؛ لغوِ بیرونی
+        # اینجا بلعیده نمی‌شود (gather با return_exceptions خطای لغوِ فرزندها
+        # را به‌جای پرتاب به‌عنوان نتیجه جمع می‌کند) ولی پاک‌سازیِ همه‌ی
+        # فرزندها کامل انجام می‌شود.
+        try:
+            await asyncio.gather(task, ex_task, scan_task, member_task,
+                                 report_task, risk_task, st_task,
+                                 return_exceptions=True)
+        except Exception:
+            pass
 
+    if isinstance(_shutdown_exc, asyncio.CancelledError):
+        raise _shutdown_exc
+    if _shutdown_exc is not None:
+        raise _shutdown_exc
     eng.log("warn", "disconnected", "اتصال قطع شد")
     return "retry"
 
