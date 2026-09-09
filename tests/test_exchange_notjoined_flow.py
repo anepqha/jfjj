@@ -126,14 +126,19 @@ branch = src[i:j]
 assert "msg_ok" not in branch, "not-member branch still sends msg_ok back to back"
 assert 'say("msg_no", link)' in branch, "msg_no no longer carries the peer link"
 assert "reminder_delay()" in branch, "reminder schedule no longer random-gapped"
-print("OK not-member branch: no msg_ok, link passed, random gap")
+# «نیومدی + لینک» فقط برای کسی که کانالش ثبت شده، نه هر ریپلای‌کننده
+assert "deep=False" in branch, "not-member branch digs profile/history channels"
+assert "ex_by_peer" in branch, "not-member branch ignores registered records"
+assert "ex_notmember_skip" in branch, "no silent-skip for random repliers"
+print("OK not-member branch: no msg_ok, link passed, random gap, registered-only")
 
 # member-None branch must not send msg_ok before a real join either
 i2 = src.find("# ── نامشخص ──")
 j2 = src.find("# ── عضو هست →", i2)
 branch2 = src[i2:j2]
 assert "msg_ok" not in branch2, "unknown-membership branch still sends msg_ok early"
-print("OK unknown branch: no early msg_ok")
+assert "deep=False" in branch2, "unknown-membership branch digs profile channels"
+print("OK unknown branch: no early msg_ok, registered-only")
 
 # the reminder queue must also drive already-joined (initiate) records
 k = src.find("def ex_reminder_due")
@@ -141,6 +146,14 @@ assert k > 0
 frag = src[k:k + 600]
 assert "'pending','joined'" in frag, "ex_reminder_due does not include joined records"
 print("OK ex_reminder_due includes joined")
+
+# the reminder loop must use the FAST membership check so the check
+# interval (15-30 s) is not added on top of the user-set gap
+r = src.find("# ── یادآوری عضو‌نشده")
+r2 = src.find("# ۳) چک دوره‌ای", r)
+assert r > 0 and r2 > r
+assert "fast=True" in src[r:r2], "reminder loop not using fast check"
+print("OK reminder loop uses fast membership check")
 
 # ── 6. Behavioural: send_not_joined_reminder body ──────────────────
 # Extract the real function and run it with a real Engine and a fake
@@ -226,8 +239,13 @@ say_calls = []
 async def fake_say(key, channel="", fallbacks=()):
     say_calls.append((key, channel))
     return True
-async def fake_find(event, sender, chat_id):
-    return "@theirchan", "از پیام خودش"
+
+FIND_RESULT = {"link": "@theirchan", "src": "از پیام خودش"}
+async def fake_find(event, sender, chat_id, deep=True):
+    # deep=False یعنی فقط لینکِ خودِ پیام؛ پیدا کردن کانال از پروفایل
+    # یا پیام‌های قبلی در مسیر «عضو نیست» دیگر اتفاق نمی‌افتد.
+    return FIND_RESULT["link"], FIND_RESULT["src"]
+
 def gap30():
     return 30
 
@@ -273,7 +291,75 @@ print("H3 say_calls", say_calls, "status", rec7c["status"],
 assert len(say_calls) == 2 and say_calls[-1] == ("msg_no", "@theirchan")
 assert rec7c["status"] == "pending" and rec7c["reminders"] == 1
 print("OK H3 new claim after leave → fresh two-message round")
+
+# H4 — random replier: no link in the message AND no registered record
+# → complete silence, no record created (this was the reported bug:
+# «نیومدی + لینک» روی هرکی که ریپ می‌زنه)
+FIND_RESULT["link"] = ""
+class Stranger:
+    id = 7100
+before_records = len(eng2.db.ex_list(None, 500))
+stranger_says = list(say_calls)
+asyncio.run(_blk(eng2, xx, False, Evt(), Stranger(), "stranger",
+                 fake_say, fake_find, gap30, holder))
+after_records = len(eng2.db.ex_list(None, 500))
+print("H4 say_calls", say_calls, "records", before_records, "→", after_records)
+assert say_calls == stranger_says, "random replier got a reply"
+assert after_records == before_records, "record created for a stranger"
+print("OK H4 random replier without link/record → silence")
+
+# H5 — replier with no link in the message but a REGISTERED record
+# (e.g. created by the group scan) → «نیومدی» with the REGISTERED link
+reg, _n = eng2.db.ex_add(7200, "scanned", "@scannedchan")
+eng2.db.ex_set(reg["id"], status="joined", direction="out", peer_id=7200)
+class Scanned:
+    id = 7200
+asyncio.run(_blk(eng2, xx, False, Evt(), Scanned(), "scanned",
+                 fake_say, fake_find, gap30, holder))
+rec7200 = eng2.db.ex_get(reg["id"])
+print("H5 say_calls", say_calls[-1], "status", rec7200["status"],
+      "next_gap", rec7200["next_reminder"] - now)
+assert say_calls[-1] == ("msg_no", "@scannedchan"), \
+    "registered partner did not get «نیومدی» with the registered link"
+assert rec7200["status"] == "joined", "initiate record was clobbered"
+assert 20 <= rec7200["next_reminder"] - now <= 40
+print("OK H5 registered partner (no link in message) → «نیومدی» + registered link")
 print("OK handler branch behavioural")
+
+# ── 6.7 Behavioural: fast membership check does not stretch the gap ─
+# Extract the real confirm_peer_membership and verify the second check
+# sleeps ~2 s in fast mode (reminder turns) instead of the full
+# membership-check interval (15-30 s) that used to be ADDED on top of
+# the user-set reminder gap.
+a = src.find("    async def confirm_peer_membership")
+b = src.find("    async def join_link", a)
+assert a > 0 and b > a, "confirm_peer_membership not found"
+cf_src = "\n".join(ln[4:] if ln.startswith("    ") else ln
+                   for ln in src[a:b].splitlines())
+
+SLEEPS = []
+class FakeAsyncio:
+    @staticmethod
+    async def sleep(s):
+        SLEEPS.append(s)
+async def always_out(uid):
+    return False
+cns = {"eng": eng2, "asyncio": FakeAsyncio, "peer_in_my_channel": always_out,
+       "membership_check_delay": lambda: 25}
+exec(cf_src, cns)
+confirm = cns["confirm_peer_membership"]
+
+SLEEPS.clear()
+got = asyncio.run(confirm(1))
+print("CF full sleep", SLEEPS, "->", got)
+assert got is False and len(SLEEPS) == 1 and 15 <= SLEEPS[0] <= 30
+
+SLEEPS.clear()
+got = asyncio.run(confirm(1, fast=True))
+print("CF fast sleep", SLEEPS, "->", got)
+assert got is False and len(SLEEPS) == 1 and 0 < SLEEPS[0] <= 3, \
+    "fast check still sleeps the full membership interval"
+print("OK fast check: ~2s instead of 15-30s (gap no longer stretched)")
 
 # ── 7. Behavioural: the reminder loop itself (real code, real DB) ──
 a = src.find("# ── یادآوری عضو‌نشده: دو پیام «نیومدی»")
@@ -310,7 +396,11 @@ class Stub:
         self.sent = []
         self.left = []
         self.notes = []
-    async def confirm(self, pid):
+        self.fast = []
+    async def confirm(self, pid, fast=False):
+        # نوبت‌های یادآوری باید با fast=True صدا زده شوند تا فاصله‌ی
+        # چک عضویت روی بازه‌ی تنظیم‌شده‌ی کاربر اضافه نشود.
+        self.fast.append(bool(fast))
         return self.member_map.get(pid)
     async def send_rem(self, rec):
         self.sent.append(rec["id"])
@@ -346,6 +436,9 @@ asyncio.run(run_once(eng, x2, stub))
 now = int(time.time())
 g1 = eng.db.ex_get(r1["id"])
 print("S1 sent", stub.sent, "r1 reminders", g1["reminders"], "next", g1["next_reminder"] - now)
+assert stub.fast and all(stub.fast), \
+    "reminder turn did not use the fast membership check"
+print("OK S1 reminder turns check membership in fast mode")
 assert stub.sent.count(r1["id"]) == 1, "second reminder not sent exactly once"
 assert g1["reminders"] == 2
 assert 20 <= g1["next_reminder"] - now <= 40, "leave-check gap not 20-40s after 2nd msg"
