@@ -542,6 +542,19 @@ class DB:
         return self._x("SELECT * FROM exchange WHERE lower(link)=lower(?)",
                        (link,), "one")
 
+    def ex_by_peer(self, peer_id):
+        """آخرین رکورد تبادلی که کانالِ این طرف در آن ثبت شده است.
+        برای اینکه «نیومدی» فقط به کسی برود که واقعاً کانالش را ثبت
+        کرده — نه به هر ریپلای‌کننده‌ی تصادفی."""
+        if not peer_id:
+            return None
+        try:
+            pid = int(peer_id)
+        except (TypeError, ValueError):
+            return None
+        return self._x("SELECT * FROM exchange WHERE peer_id=?"
+                       " ORDER BY id DESC LIMIT 1", (pid,), "one")
+
     def ex_get(self, eid):
         return self._x("SELECT * FROM exchange WHERE id=?", (eid,), "one")
 
@@ -2300,7 +2313,9 @@ class Engine:
                     # پیام ناموفق همیشه پیش‌فرض دارد؛ خاموشی معنا ندارد.
                     return (f"**{when}** — متنی تعیین نکرده‌ای، پس پیش‌فرض "
                             f"«{DEFAULT_MSG_NO}» می‌رود و زیرش آیدی کانالی که "
-                            "طرف برای گرفتن ممبر ثبت کرده می‌آید.\n\n"
+                            "طرف برای گرفتن ممبر ثبت کرده می‌آید. فقط به کسی "
+                            "می‌رود که لینکش را فرستاده یا کانالش قبلاً در "
+                            "تبادل ثبت شده؛ ریپلای‌های تصادفی جواب نمی‌گیرند.\n\n"
                             f"`{command} متن دلخواهت`\n\n"
                             "می‌توانی از این‌ها هم استفاده کنی:\n"
                             "`{name}` اسم طرف • `{channel}` کانال طرف • "
@@ -2807,7 +2822,8 @@ class Engine:
         for title, command, key in sections:
             cur = x.get(key) or ""
             if not cur and key == "msg_no":
-                cur = f"{DEFAULT_MSG_NO} (پیش‌فرض) + آیدی کانال طرف، زیر متن"
+                cur = (f"{DEFAULT_MSG_NO} (پیش‌فرض) + آیدی کانال طرف، زیر متن"
+                       " — فقط برای کسی که کانالش ثبت شده است")
             lines += ["", title, "دستور آماده برای کپی:", f"`{command}`",
                       f"متن فعلی: {cur or 'تنظیم نشده'}"]
         lines += ["", "فرمان عمومی «تبادل پیام» متن موفقیت هر دو نوع Join را تنظیم می‌کند.",
@@ -4291,16 +4307,19 @@ async def connect_and_run(eng, creds):
                 return None
         return False if saw_false else None
 
-    async def confirm_peer_membership(user_id):
+    async def confirm_peer_membership(user_id, fast=False):
         """عضویت را حداقل دوبار تأیید می‌کند تا منفی کاذب ندهد.
         اگر درخواست اول False باشد، یک بار دیگر بعد از فاصله تصادفی
         تنظیم‌شده بررسی می‌شود؛ هیچ پیام اضافه‌ای در این فاصله ارسال نمی‌شود.
+        fast=True برای نوبت‌های یادآوری است: چکِ دوم فقط چند ثانیه است تا
+        فاصله‌ی چک عضویت روی بازه‌ی تنظیم‌شده‌ی کاربر جمع نشود — فاصله‌ی
+        واقعی بین دو پیام «نیومدی» همان بازه‌ی تنظیم‌شده می‌ماند.
         """
         first = await peer_in_my_channel(user_id)
         if first is not False:
             return first
         # گاهی انتشار عضویت در API تلگرام چند ثانیه طول می‌کشد.
-        await asyncio.sleep(membership_check_delay())
+        await asyncio.sleep(2 if fast else membership_check_delay())
         return await peer_in_my_channel(user_id)
 
     async def join_link(link):
@@ -4486,11 +4505,15 @@ async def connect_and_run(eng, creds):
             return False
 
     # ---------- پیدا کردن کانال طرف ----------
-    async def find_their_channel(event, sender, chat_id):
+    async def find_their_channel(event, sender, chat_id, deep=True):
         """کانال طرف را پیدا می‌کند. اولویت:
            ۱) لینک داخل همین ریپلای
            ۲) لینک در پیام‌های قبلی خودش در همین گروه
            ۳) کانال شخصی روی پروفایلش
+        deep=False فقط گزینه‌ی ۱ است و برای مسیر «عضو نیست» به کار می‌رود:
+        کانال طرف هرگز از پروفایل یا پیام‌های قبلی‌اش بیرون کشیده نمی‌شود تا
+        هر ریپلای‌کننده‌ی تصادفی‌ای «نیومدی + لینک» نگیرد؛ فقط همان لینکی
+        که خودش در همین پیام فرستاده مبنا است.
         """
         mine = {(eng.st.prof(t)["channel"] or "").lstrip("@").lower()
                 for t in ("standard", "vip")}
@@ -4508,6 +4531,9 @@ async def connect_and_run(eng, creds):
         got = pick(extract_links(event.raw_text))
         if got:
             return got, "از پیام خودش"
+
+        if not deep:
+            return None, ""
 
         # ۲) پیام‌های قبلی همین شخص در همین گروه
         try:
@@ -4666,55 +4692,54 @@ async def connect_and_run(eng, creds):
         # می‌رود (reply_joined). قبلاً «نیومدی» و «جوین شدم» پشت سر هم
         # فرستاده می‌شدند؛ آن باگ برطرف شد.
         if member is False:
-            link, _src = await find_their_channel(event, sender, event.chat_id)
-            max_rem = max(0, min(3, int(x.get("max_reminders", 2) or 0)))
-            send_now = False
-            no_link_notice_key = (int(getattr(sender, "id", 0) or 0),
-                                  int(getattr(event, "chat_id", 0) or 0))
+            # «نیومدی + لینک» فقط برای کسی می‌رود که کانالش واقعاً در تبادل
+            # ثبت شده باشد: یا لینکش را در همین پیام خودش فرستاده، یا
+            # قبلاً رکوردی برایش ساخته شده (مثلاً از اسکن گروه). کانال
+            # شخصیِ پروفایل و لینک پیام‌های قبلی دیگر بیرون کشیده نمی‌شود
+            # تا هر ریپلای‌کننده‌ی تصادفی‌ای «نیومدی + لینک» نگیرد.
+            link, _src = await find_their_channel(event, sender, event.chat_id,
+                                                  deep=False)
+            rec = None
             if link:
                 rec, _ = eng.db.ex_add(sender.id, sender_name, link)
-                old_count = max(0, int(rec.get("reminders") or 0)) if rec else 0
-                now0 = int(time.time())
-                # اگر همین حالا نوبتِ یادآوری/لفتِ این طرف فعال است، پیامِ
-                # تازه‌ای پشت سر همان نمی‌رود؛ همان زمان‌بندی کار خودش را
-                # می‌کند تا دو پیام «نیومدی» پشت سر هم نیفتند.
-                active_window = bool(rec) and int(rec.get("next_reminder") or 0) > now0
-                if rec and rec["status"] == "joined":
-                    # رکورد پیش‌قدم را خراب نکن؛ دو یادآوری فاصله‌دار می‌رود
-                    # و اگر طرف تا آن موقع نیامد، از کانالش لفت می‌دهم.
-                    if not active_window and old_count < max_rem and x["reply"]:
-                        send_now = True
-                    eng.db.ex_set(rec["id"],
-                                  src_chat=event.chat_id, src_msg=event.id,
-                                  note="پیش‌قدم انجام شده؛ طرف هنوز عضو کانال من نیست")
-                elif rec and rec["status"] != "rejected":
-                    # رکورد بسته‌شده (لفت/شکست) با ادعای تازه از نو شروع می‌شود.
-                    fresh = rec["status"] in ("left", "failed")
-                    if fresh:
-                        old_count = 0
-                    if not active_window and old_count < max_rem and x["reply"]:
-                        send_now = True
-                    eng.db.ex_set(rec["id"], status="pending",
-                                  strikes=0 if fresh else rec["strikes"] + 1,
-                                  direction="in",
-                                  src_chat=event.chat_id, src_msg=event.id,
-                                  replied=0, reminders=old_count,
-                                  note="عضو نیست — دو یادآوری فاصله‌دار، بعد لفت")
-            else:
-                # نبودن لینک نباید باعث سکوت کامل شود؛ متن ناموفقِ ثبت‌شده
-                # یک‌بار روی همین پیام ارسال می‌شود، بدون اینکه لینک حدس بزنیم.
-                now0 = time.time()
-                last_notice = getattr(on_exchange_request, "_no_link_notice", {})
-                if not isinstance(last_notice, dict):
-                    last_notice = {}
-                if (max_rem > 0 and x["reply"]
-                        and now0 >= float(last_notice.get(no_link_notice_key, 0) or 0)):
+            if not rec:
+                # رکورد قبلی: کانالی که خودِ همین طرف قبلاً ثبت کرده است.
+                rec = eng.db.ex_by_peer(sender.id)
+            if not rec or rec["status"] in ("rejected", "leaving"):
+                # نه لینکی در پیامش هست و نه کانالی در تبادل ثبت کرده →
+                # ریپلای تصادفی است؛ نه پیامی می‌رود و نه رکوردی ساخته می‌شود.
+                eng.log("info", "ex_notmember_skip", sender_name)
+                return
+            link = link or (rec.get("link") or "")
+            max_rem = max(0, min(3, int(x.get("max_reminders", 2) or 0)))
+            send_now = False
+            now0 = int(time.time())
+            old_count = max(0, int(rec.get("reminders") or 0))
+            # اگر همین حالا نوبتِ یادآوری/لفتِ این طرف فعال است، پیامِ
+            # تازه‌ای پشت سر همان نمی‌رود؛ همان زمان‌بندی کار خودش را
+            # می‌کند تا دو پیام «نیومدی» پشت سر هم نیفتند.
+            active_window = int(rec.get("next_reminder") or 0) > now0
+            if rec["status"] == "joined":
+                # رکورد پیش‌قدم را خراب نکن؛ دو یادآوری فاصله‌دار می‌رود
+                # و اگر طرف تا آن موقع نیامد، از کانالش لفت می‌دهم.
+                if not active_window and old_count < max_rem and x["reply"]:
                     send_now = True
-                    last_notice[no_link_notice_key] = now0 + 600
-                    try:
-                        setattr(on_exchange_request, "_no_link_notice", last_notice)
-                    except Exception:
-                        pass
+                eng.db.ex_set(rec["id"],
+                              src_chat=event.chat_id, src_msg=event.id,
+                              note="پیش‌قدم انجام شده؛ طرف هنوز عضو کانال من نیست")
+            else:
+                # رکورد بسته‌شده (لفت/شکست) با ادعای تازه از نو شروع می‌شود.
+                fresh = rec["status"] in ("left", "failed")
+                if fresh:
+                    old_count = 0
+                if not active_window and old_count < max_rem and x["reply"]:
+                    send_now = True
+                eng.db.ex_set(rec["id"], status="pending",
+                              strikes=0 if fresh else rec["strikes"] + 1,
+                              direction="in",
+                              src_chat=event.chat_id, src_msg=event.id,
+                              replied=0, reminders=old_count,
+                              note="عضو نیست — دو یادآوری فاصله‌دار، بعد لفت")
             eng.log("info", "ex_notmember", sender_name)
             # اولین «نیومدی» همین حالا می‌رود؛ say خودش آیدی کانالِ ثبت‌شده‌ی
             # طرف را زیر متن می‌گذارد و قبل از ارسال تأخیر انسانی می‌گیرد.
@@ -4741,18 +4766,25 @@ async def connect_and_run(eng, creds):
         # ── نامشخص ──
         if member is None:
             eng.log("warn", "ex_unknown", f"{sender_name} — عضویت قابل بررسی نبود")
-            # حتی وقتی عضویت نامشخص است، جوینِ طرف را متوقف نکن (رفع باگ).
-            link, _src = await find_their_channel(event, sender, event.chat_id)
+            # حتی وقتی عضویت نامشخص است، جوینِ طرف را متوقف نکن (رفع باگ)؛
+            # اما مثل مسیر «عضو نیست» فقط لینکِ خودِ پیام یا رکوردِ ثبت‌شده‌ی
+            # قبلی مبناست — نه کانال شخصی پروفایل هر ریپلای‌کننده‌ای.
+            link, _src = await find_their_channel(event, sender, event.chat_id,
+                                                  deep=False)
+            rec0 = None
             if link:
                 rec0, _n = eng.db.ex_add(sender.id, sender_name, link)
-                if rec0 and rec0["status"] not in ("joined", "rejected",
-                                                    "left", "failed"):
-                    eng.db.ex_set(rec0["id"], status="approved", direction="in",
-                                  peer_id=sender.id, peer_name=sender_name,
-                                  src_chat=event.chat_id, src_msg=event.id,
-                                  replied=0, strikes=0)
-                    eng.log("info", "ex_reciprocal",
-                            f"{sender_name} → {link} (عضویت نامشخص − در صف)")
+            if not rec0:
+                rec0 = eng.db.ex_by_peer(sender.id)
+            if rec0 and rec0["status"] not in ("joined", "rejected",
+                                               "left", "failed"):
+                eng.db.ex_set(rec0["id"], status="approved", direction="in",
+                              peer_id=sender.id, peer_name=sender_name,
+                              src_chat=event.chat_id, src_msg=event.id,
+                              replied=0, strikes=0)
+                eng.log("info", "ex_reciprocal",
+                        f"{sender_name} → {link or rec0.get('link')}"
+                        " (عضویت نامشخص − در صف)")
             # پیام «جوین شدم» فقط بعد از Join واقعی می‌رود (reply_joined)؛
             # همین‌جا و زودتر از موعد گفته نمی‌شود تا پشت سر پیام دیگری
             # نیفتد. اگر متنی برای انتظار ثبت شده باشد، همان می‌رود.
@@ -4985,7 +5017,10 @@ async def connect_and_run(eng, creds):
                 for rec in eng.db.ex_reminder_due(now_rem, 20):
                     if not rec.get("peer_id"):
                         continue
-                    still = await confirm_peer_membership(rec["peer_id"])
+                    # چک سریع: فاصله‌ی بررسی عضویت (۱۵–۳۰ ثانیه) روی
+                    # بازه‌ی تنظیم‌شده‌ی «فاصله یادآوری» کاربر جمع نشود.
+                    still = await confirm_peer_membership(rec["peer_id"],
+                                                          fast=True)
                     now2 = int(time.time())
                     max_rem = max(0, min(3, int(x.get("max_reminders", 2) or 0)))
                     if still is True:
