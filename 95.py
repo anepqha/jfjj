@@ -47,8 +47,8 @@ PREFIX = "."          # پیشوند دستورها. هم "." و هم "/" کار
 DRY_RUN = False       # True = چیزی واقعاً ارسال نمی‌شود (تست)
 
 # متن پیش‌فرض «جوین نشدی»؛ وقتی کاربر با «تبادل پیام ناموفق» متنی ثبت
-# نکرده باشد، همین جمله فرستاده می‌شود و زیرش آیدی کانالی که طرف برای
-# گرفتن ممبر ثبت کرده می‌آید.
+# نکرده باشد، همین جمله + کانال خودم (standard/vip) فرستاده می‌شود.
+# وقتی متن سفارشی ثبت شده باشد، فقط همان متن می‌رود و لینک طرف زیرش نمی‌آید.
 DEFAULT_MSG_NO = "نیومدی"
 
 
@@ -93,18 +93,24 @@ DEFAULTS = {
         "max_join_gap_sec": 60,
         # بررسی عضویت طرف بی‌صدا و با فاصله تصادفی انجام می‌شود.
         # check_interval_sec فقط برای سازگاری با تنظیم‌های خیلی قدیمی است.
-        "check_min_sec": 15,
-        "check_max_sec": 30,
-        "check_interval_sec": 30,
+        # فیکس دائمی: بعد از جوین، تا ابد هر ۱۰-۲۰ ثانیه چک می‌کنیم،
+        # اگر طرف لفت داد فوراً (بعد ۱ بار) از کانالش لفت می‌دهیم.
+        "check_min_sec": 10,
+        "check_max_sec": 20,
+        "check_interval_sec": 20,
         "response_delay_sec": 15,  # تأخیر پاسخ بعد از Join واقعی
         "max_joins_per_day": 0,    # Join بدون سقف روزانه
-        "recheck_hours": 12,       # سازگاری با نسخه‌های قدیمی
-        "recheck_minutes": 1,       # بررسی پیش‌فرض عضویت هر یک دقیقه
-        "max_strikes": 3,          # چند بار نبود → لفت
+        "recheck_hours": 0,        # ۰ = چک دائمی، هیچ‌وقت متوقف نشود (فیکس باگ ۱۵ثانیه‌ای)
+        "recheck_minutes": 1,       # بررسی پیش‌فرض عضویت هر یک دقیقه (پشتیبان قدیمی)
+        "max_strikes": 1,          # فیکس جدی: بعد از ۱ بار نبودن فوراً لفت (قبلاً ۳ بار بود و طرف ۱۵ ثانیه‌ای لفت می‌داد و چک دائمی نداشت)
+        "permanent_check": True,   # چک دائمی: حتی بعد از ساعت‌ها/روزها همچنان چک کن
+        "permanent_check_max_hours": 0,  # ۰ = بدون محدودیت زمانی، تا ابد چک کن
         # متن جواب‌ها را خودت تعیین می‌کنی:
         #   .ex msgok متن   → وقتی جوین شد
-        #   .ex msgno متن   → وقتی طرف هنوز عضو نشده (پیش‌فرض: «نیومدی»
-        #                     + آیدی کانالی که طرف ثبت کرده، زیر متن)
+        #   .ex msgno متن   → وقتی طرف هنوز عضو نشده
+        #                     اگر متن سفارشی ثبت کرده باشی: فقط همان متن می‌رود
+        #                     (لینک طرف زیرش نمی‌آید). اگر ثبت نکرده باشی:
+        #                     پیش‌فرض «نیومدی» + کانال خودت (نه کانال طرف)
         #   .ex msgwait متن → وقتی در حال بررسی است
         # هرکدام خالی باشد، همان مورد جواب داده نمی‌شود؛ تنها استثنا msgno است
         # که همیشه پیش‌فرض «نیومدی» می‌فرستد.
@@ -123,14 +129,16 @@ DEFAULTS = {
         "response_max_sec": 48,      # (پیش‌فرض: ۱۱–۴۸ ثانیه)
         "reply_min_sec": 5,          # بازه‌ی تصادفی تأخیر پاسخ‌های مستقیم رویداد
         "reply_max_sec": 18,         # (عضو نیست/صبر کن/کانالت پیدا نشد؛ ۵–۱۸ ثانیه)
-        "reminder_min_sec": 20,      # فاصله کمینه بین دو پیام «نیومدی» (پیش‌فرض ۲۰–۴۰ ثانیه تصادفی)
-        "reminder_max_sec": 40,      # فاصله بیشینه بین دو پیام «نیومدی» — هیچ‌وقت پشت سر هم نمی‌روند
+        "reminder_min_sec": 10,      # فاصله کمینه بین دو پیام «نیومدی» (پیش‌فرض ۱۰–۲۰ ثانیه تصادفی — همگام با چک دائمی)
+        "reminder_max_sec": 20,      # فاصله بیشینه بین دو پیام «نیومدی» — هیچ‌وقت پشت سر هم نمی‌روند، همگام با چک دائمی
         # بعد از این تعداد پیام «عضو نیست»، اگر طرف هنوز نیامده باشد از
         # کانالش لفت می‌دهیم (یا اگر هنوز جوین نشده‌ایم، تبادل لغو می‌شود).
         "max_reminders": 2,
         # ── حالت پیش‌قدم: خودت اول جوین می‌شوی ──
         "initiate": True,         # پیش‌فرض روشن
         "scan_every_sec": 30,     # پیش‌قدم: هر ۳۰ ثانیه پیام‌های جدید را می‌بیند
+        "scan_jitter_min_sec": 5,  # تأخیر تصادفی بین اسکن گروه‌ها — ضد اسپم (پیش‌فرض ۵–۱۵ ثانیه)
+        "scan_jitter_max_sec": 15, # اگر ۲ گروه داری: اولی سر ۳۰ ثانیه، دومی ۵–۱۵ ثانیه بعد، بعد دوباره ۳۰ ثانیه صبر
         "scan_every_min": 1,      # سازگاری با تنظیم قدیمیِ دقیقه‌ای
         "scan_limit": 50,         # چند پیام آخر هر گروه
         "scan_max_age_sec": 300,   # فقط لینک حداکثر ۵ دقیقه اخیر
@@ -138,6 +146,7 @@ DEFAULTS = {
         "scan_pick": 1,           # تازه‌ترین لینک جدید
         "msg_first": "",          # متنی که بعد از جوینِ خودت ریپلای می‌شود
         "scan_last": {},          # آخرین پیام دیده‌شده هر گروه
+        "scan_last_time": {},     # آخرین زمان اسکن هر گروه — برای پخش تصادفی ضد اسپم
         # فقط به ریپلای‌هایی که این کلمات را دارند واکنش نشان بده.
         # خالی = به هر ریپلایی روی پیام تو واکنش نشان می‌دهد.
         "words": [],
@@ -151,6 +160,20 @@ DEFAULTS = {
         "hour_cap_on": False,        # پیش‌فرض خاموش (فقط با دستور فعال می‌شود)
         "hour_cap": 60,              # عددِ امنِ پیشنهادی: ۶۰ جوین/ساعت
         "_hour_cap_blocked": 0,      # آخرین باری که به‌خاطر سقف متوقف شده
+        # ── تطبیقیِ هوشمند: فاصله جوین با FloodWait و آپ‌تایم زیاد می‌شود ──
+        #  ایده کاربر: حالت عادی هر ۳۰ ثانیه یک جوین؛ اگر FloodWait آمد
+        #  هر بار ۱۵ ثانیه به فاصله اضافه شود؛ اگر چند ساعت روشن بود
+        #  از ۳۰ ثانیه به ۱ دقیقه برود تا ریسک ریپ کم شود.
+        "adaptive_on": True,                    # روشن پیش‌فرض
+        "adaptive_flood_step_sec": 15,          # هر FloodWait چقدر اضافه کند
+        "adaptive_flood_max_sec": 120,          # سقف اضافه از Flood
+        "adaptive_flood_decay_min": 60,         # بعد از این دقیقه بدون Flood، یکی کم می‌کند
+        "adaptive_uptime_threshold_hours": 3,   # بعد از چند ساعت کند شود
+        "adaptive_uptime_extra_sec": 30,        # بعد از آستانه چقدر اضافه (۳۰→۶۰)
+        "adaptive_uptime_per_hour_sec": 10,     # هر ساعت اضافه بعد آستانه چقدر بیشتر
+        "_adaptive_flood_extra": 0,             # اضافه فعلی از Flood
+        "_adaptive_last_flood": 0,              # آخرین زمان Flood
+        "_adaptive_last_decay": 0,              # آخرین چک کاهش
     },
 
     # ── محافظ ریپورت ───────────────────────────────────
@@ -290,31 +313,49 @@ class Settings:
                     # یک بار بعد از ارتقا دوباره آخرین پیام‌ها را ببین تا کانال
                     # معطل‌مانده‌ای از اسکن قبلی جا نماند.
                     self.data["exchange"]["scan_last"] = {}
+                # ضد اسپم چندگروهی: فاصله تصادفی ۵–۱۵ ثانیه بین اسکن گروه‌ها
+                if "scan_jitter_min_sec" not in old_ex:
+                    self.data["exchange"]["scan_jitter_min_sec"] = 5
+                if "scan_jitter_max_sec" not in old_ex:
+                    self.data["exchange"]["scan_jitter_max_sec"] = 15
+                if "scan_last_time" not in old_ex:
+                    self.data["exchange"]["scan_last_time"] = {}
                 if old_ex.get("recheck_minutes") in (None, 0):
                     self.data["exchange"]["recheck_minutes"] = 1
-                # مقدار پیش‌فرض بررسی عضویت: تصادفی بین ۱۵ تا ۳۰ ثانیه.
-                # جفت قدیمی ۵ تا ۱۵ و عدد ثابت ۱۵، تنظیم پیش‌فرض قبلی بودند.
+                # مقدار پیش‌فرض بررسی عضویت: تصادفی بین ۱۰ تا ۲۰ ثانیه (فیکس دائمی).
+                # جفت قدیمی ۵-۱۵، ۱۵-۱۵ و ۱۵-۳۰ تنظیم پیش‌فرض قبلی بودند و چک دائمی نداشتند.
                 old_pair = (old_ex.get("check_min_sec"), old_ex.get("check_max_sec"))
                 if ("check_min_sec" not in old_ex or "check_max_sec" not in old_ex
-                        or old_pair in ((5, 15), (15, 15))):
-                    self.data["exchange"]["check_min_sec"] = 15
-                    self.data["exchange"]["check_max_sec"] = 30
-                if "check_interval_sec" not in old_ex or old_ex.get("check_interval_sec") == 15:
-                    self.data["exchange"]["check_interval_sec"] = 30
+                        or old_pair in ((5, 15), (15, 15), (15, 30))):
+                    self.data["exchange"]["check_min_sec"] = 10
+                    self.data["exchange"]["check_max_sec"] = 20
+                if "check_interval_sec" not in old_ex or old_ex.get("check_interval_sec") in (15, 30):
+                    self.data["exchange"]["check_interval_sec"] = 20
                 if "response_delay_sec" not in old_ex:
                     self.data["exchange"]["response_delay_sec"] = 15
+                # فیکس جدی: چک دائمی و لفت فوری بعد ۱ بار نبودن
+                # قبلاً max_strikes=3 بود و طرف بعد ۱۵ ثانیه لفت می‌داد و ما دیر لفت می‌دادیم
+                # الان پیش‌فرض ۱ است تا فوراً لفت بدهیم و چک دائمی داشته باشیم
+                if old_ex.get("max_strikes") in (None, 3):
+                    self.data["exchange"]["max_strikes"] = 1
+                if old_ex.get("recheck_hours") in (None, 12):
+                    self.data["exchange"]["recheck_hours"] = 0
+                if "permanent_check" not in old_ex:
+                    self.data["exchange"]["permanent_check"] = True
+                if "permanent_check_max_hours" not in old_ex:
+                    self.data["exchange"]["permanent_check_max_hours"] = 0
                 # پیش‌فرضِ «تعداد یادآوری» حالا دو است: دو پیام «نیومدی» با
                 # فاصله‌ی تصادفی و بعد از آن لفت. مقدارهای پیش‌فرض نسخه‌های
                 # قبل (۳ و ۱) به همین تعداد جدید مهاجرت می‌کنند؛ اگر کاربر
                 # عمداً عدد دیگری ثبت کرده باشد، دست نمی‌خورد.
                 if old_ex.get("max_reminders") in (None, 1, 3):
                     self.data["exchange"]["max_reminders"] = 2
-                # فاصله‌ی پیش‌فرض یادآوری هم از ۵–۱۵ به ۲۰–۴۰ ثانیه‌ی تصادفی
-                # می‌رود تا دو پیام «نیومدی» هرگز پشت سر هم فرستاده نشوند.
+                # فاصله‌ی پیش‌فرض یادآوری هم از ۵–۱۵ و ۲۰–۴۰ به ۱۰–۲۰ ثانیه‌ی تصادفی
+                # می‌رود تا دو پیام «نیومدی» هرگز پشت سر هم فرستاده نشوند و با چک دائمی همگام باشد.
                 if ((old_ex.get("reminder_min_sec"), old_ex.get("reminder_max_sec"))
-                        in ((5, 15), (5, 5), (15, 15))):
-                    self.data["exchange"]["reminder_min_sec"] = 20
-                    self.data["exchange"]["reminder_max_sec"] = 40
+                        in ((5, 15), (5, 5), (15, 15), (20, 40))):
+                    self.data["exchange"]["reminder_min_sec"] = 10
+                    self.data["exchange"]["reminder_max_sec"] = 20
                 if old_ex.get("initiate") is False:
                     self.data["exchange"]["initiate"] = True
                 if old_ex.get("auto_join") is False:
@@ -1140,6 +1181,15 @@ HELP = """🤖 راهنمای جفج
 تبادل اخطار ۳ — بعد از سه بار نبودن لفت بده (این پیام نیست)
 تبادل تعداد یادآوری ۲ — دو پیام «نیومدی» با فاصله؛ بعد از آن لفت (پیش‌فرض ۲؛ ۰ = بدون پیام)
 تبادل فاصله یادآوری ۲۰ ۴۰ — فاصله تصادفی بین دو پیام «نیومدی» (پیش‌فرض)
+🧠 تطبیقی هوشمند — فاصله جوین با FloodWait و آپ‌تایم خودکار زیاد می‌شود
+تبادل تطبیقی — نمایش وضعیت (پایه + Flood + آپ‌تایم)
+تبادل تطبیقی روشن / خاموش — فعال/غیرفعال کردن تطبیقی (پیش‌فرض روشن)
+تبادل تطبیقی ریست — صفر کردن اضافه Flood
+تبادل تطبیقی flood 15 — هر FloodWait چقدر اضافه کند (پیش‌فرض ۱۵ ثانیه)
+تبادل تطبیقی max 120 — سقف اضافه Flood (پیش‌فرض ۱۲۰ ثانیه)
+تبادل تطبیقی decay 60 — هر چند دقیقه بدون Flood کم شود (پیش‌فرض ۶۰ دقیقه)
+تبادل تطبیقی uptime 3 — بعد از چند ساعت کند شود (پیش‌فرض ۳ ساعت)
+تبادل تطبیقی extra 30 10 — اضافه آپ‌تایم (۳۰ ثانیه بعد آستانه + ۱۰ ثانیه هر ساعت)
 
 📊 گزارش خصوصی تبادل
 تبادل گزارش — ورود به منوی گزارش تبادل
@@ -1792,6 +1842,181 @@ class Engine:
                             "WHERE joined_at IS NOT NULL AND joined_at>=?", (hour_ago,), "one")
         oldest = (oldest or {}).get("m") or now
         return max(1, int(oldest) + 3600 - now)
+
+    # ── تطبیقیِ هوشمند: FloodWait + آپ‌تایم طولانی ──
+    def adaptive_extra(self, now=None):
+        """برمی‌گرداند (flood_extra, uptime_extra, total_extra)"""
+        x = self.ex_cfg()
+        if not x.get("adaptive_on", True):
+            return 0, 0, 0
+        now = now or int(time.time())
+        flood_extra = max(0, int(x.get("_adaptive_flood_extra", 0) or 0))
+        uptime = now - self.started
+        thresh_h = int(x.get("adaptive_uptime_threshold_hours", 3) or 3)
+        thresh = thresh_h * 3600
+        uptime_extra = 0
+        if uptime > thresh:
+            uptime_extra = int(x.get("adaptive_uptime_extra_sec", 30) or 30)
+            per_hour = int(x.get("adaptive_uptime_per_hour_sec", 10) or 10)
+            extra_hours = int((uptime - thresh) // 3600)
+            uptime_extra += extra_hours * per_hour
+        return flood_extra, uptime_extra, flood_extra + uptime_extra
+
+    def effective_join_gap(self, now=None):
+        """فاصله موثر جوین با احتساب تطبیقی"""
+        x = self.ex_cfg()
+        base_min = max(1, int(x.get("min_join_gap_sec", 30) or 30))
+        base_max = max(base_min, int(x.get("max_join_gap_sec", 60) or 60))
+        _, _, extra = self.adaptive_extra(now)
+        return base_min + extra, base_max + extra
+
+    def adaptive_on_flood(self, flood_seconds=0, now=None):
+        """وقتی FloodWait می‌گیریم: هر بار ۱۵ ثانیه اضافه کن"""
+        x = self.ex_cfg()
+        if not x.get("adaptive_on", True):
+            return 0
+        now = now or int(time.time())
+        step = max(1, int(x.get("adaptive_flood_step_sec", 15) or 15))
+        max_extra = max(step, int(x.get("adaptive_flood_max_sec", 120) or 120))
+        cur = max(0, int(x.get("_adaptive_flood_extra", 0) or 0))
+        new = min(max_extra, cur + step)
+        x["_adaptive_flood_extra"] = new
+        x["_adaptive_last_flood"] = now
+        x["_adaptive_last_decay"] = now
+        self.st.save()
+        # throttle را هم با فاصله جدید به‌روز کن
+        try:
+            emin, emax = self.effective_join_gap(now)
+            self.join_thr.apply({"min_gap_sec": emin, "max_gap_sec": emax, "max_per_hour": 0})
+        except Exception:
+            pass
+        self.log("warn", "adaptive_flood", f"+{step}s → extra={new}s (flood {flood_seconds}s)")
+        return new
+
+    def adaptive_maybe_decay(self, now=None):
+        """اگر مدتی Flood نیامده، کم‌کم فاصله را برگردان"""
+        x = self.ex_cfg()
+        if not x.get("adaptive_on", True):
+            return
+        now = now or int(time.time())
+        cur = int(x.get("_adaptive_flood_extra", 0) or 0)
+        if cur <= 0:
+            return
+        last = int(x.get("_adaptive_last_flood", 0) or 0)
+        if not last:
+            return
+        decay_min = max(1, int(x.get("adaptive_flood_decay_min", 60) or 60))
+        last_decay = int(x.get("_adaptive_last_decay", 0) or last)
+        # هر decay_min دقیقه یک step کم کن
+        elapsed = now - last_decay
+        if elapsed < decay_min * 60:
+            return
+        steps = elapsed // (decay_min * 60)
+        if steps <= 0:
+            return
+        step = max(1, int(x.get("adaptive_flood_step_sec", 15) or 15))
+        new = max(0, cur - int(steps * step))
+        x["_adaptive_flood_extra"] = new
+        x["_adaptive_last_decay"] = now
+        self.st.save()
+        try:
+            emin, emax = self.effective_join_gap(now)
+            self.join_thr.apply({"min_gap_sec": emin, "max_gap_sec": emax, "max_per_hour": 0})
+        except Exception:
+            pass
+        if new != cur:
+            self.log("info", "adaptive_decay", f"-{steps*step}s → extra={new}s after {decay_min}min no flood")
+
+    def adaptive_status_text(self):
+        x = self.ex_cfg()
+        on = bool(x.get("adaptive_on", True))
+        base_min = int(x.get("min_join_gap_sec", 30) or 30)
+        base_max = int(x.get("max_join_gap_sec", 60) or 60)
+        f_extra, u_extra, total = self.adaptive_extra()
+        emin, emax = self.effective_join_gap()
+        uptime = int(time.time()) - self.started
+        flood_step = int(x.get("adaptive_flood_step_sec", 15) or 15)
+        flood_max = int(x.get("adaptive_flood_max_sec", 120) or 120)
+        decay = int(x.get("adaptive_flood_decay_min", 60) or 60)
+        up_thresh = int(x.get("adaptive_uptime_threshold_hours", 3) or 3)
+        up_extra = int(x.get("adaptive_uptime_extra_sec", 30) or 30)
+        up_per_h = int(x.get("adaptive_uptime_per_hour_sec", 10) or 10)
+        last_flood = int(x.get("_adaptive_last_flood", 0) or 0)
+        last_str = "هرگز" if not last_flood else f"{secs(int(time.time())-last_flood)} پیش"
+        return "\n".join([
+            f"🧠 تطبیقیِ جوین: {'🟢 روشن' if on else '🔴 خاموش'}",
+            "━━━━━━━━━━━━",
+            f"پایه: {fa(base_min)}–{fa(base_max)} ثانیه",
+            f"موثر فعلی: {fa(emin)}–{fa(emax)} ثانیه (پایه + تطبیقی)",
+            f"  • اضافه از FloodWait: {fa(f_extra)} ثانیه",
+            f"  • اضافه از آپ‌تایم ({fa(uptime//3600)}ساعت روشن): {fa(u_extra)} ثانیه",
+            f"  • جمع اضافه: {fa(total)} ثانیه",
+            "",
+            f"⚙️ هر FloodWait: +{fa(flood_step)} ثانیه (سقف {fa(flood_max)} ثانیه)",
+            f"♻️ کاهش خودکار: هر {fa(decay)} دقیقه بدون Flood، {fa(flood_step)} ثانیه کم می‌شود",
+            f"⏳ کندشدن آپ‌تایم: بعد از {fa(up_thresh)} ساعت +{fa(up_extra)}ثانیه، هر ساعت اضافه +{fa(up_per_h)}ثانیه",
+            f"🕒 آخرین Flood: {last_str}",
+            f"🕒 آپ‌تایم فعلی: {secs(uptime)}",
+            "",
+            "دستورها:",
+            "`تبادل تطبیقی روشن/خاموش`",
+            "`تبادل تطبیقی ریست` (صفر کردن اضافه Flood)",
+            "`تبادل فاصله ۳۰ ۶۰` (تنظیم پایه)",
+            "`تبادل تطبیقی` (نمایش همین صفحه)",
+        ])
+
+    def permanent_check_status_text(self):
+        x = self.ex_cfg()
+        on = bool(x.get("permanent_check", True))
+        max_h = int(x.get("permanent_check_max_hours", 0) or 0)
+        check_min = int(x.get("check_min_sec", 10) or 10)
+        check_max = int(x.get("check_max_sec", 20) or 20)
+        strikes = int(x.get("max_strikes", 1) or 1)
+        # آمار فعلی
+        joined_cnt = len(self.db.ex_list("joined", 500))
+        pending_check = len(self.db.ex_due(int(time.time()), 100))
+        return "\n".join([
+            f"🔄 چک دائمی عضویت: {'🟢 روشن (تا ابد)' if on and max_h==0 else ('🟢 روشن' if on else '🔴 خاموش')}",
+            "━━━━━━━━━━━━",
+            f"وضعیت: {'تا ابد چک می‌کنم — هیچ‌وقت متوقف نمی‌شود' if on and max_h==0 else (f'روشن تا {fa(max_h)} ساعت بعد جوین' if on else 'خاموش')}",
+            f"فاصله چک دائمی: {fa(check_min)}–{fa(check_max)} ثانیه تصادفی (هر بار دوباره رندوم)",
+            f"فاصله «نیومدی»: {fa(check_min)}–{fa(check_max)} ثانیه تصادفی — دوبار می‌گوید بعد لفت (همگام با چک)",
+            f"لفت فوری چک دائمی: بعد از {fa(strikes)} بار نبودن → فوراً از کانالش لفت می‌دهم",
+            f"  (قبلاً ۳ بار بود و طرف بعد ۱۵ ثانیه لفت می‌داد و ما دیر می‌فهمیدیم)",
+            "",
+            f"📊 الان {fa(joined_cnt)} کانال جوین‌شده تحت نظر دائمی",
+            f"⏳ {fa(pending_check)} مورد نوبت چک فوری",
+            "",
+            "⚙️ دستورها:",
+            "`تبادل بررسی ۱۰ ۲۰` → فاصله چک و «نیومدی» (پیش‌فرض ۱۰-۲۰ ثانیه، هر بار رندوم)",
+            "`تبادل اخطار ۱` → بعد چند بار نبودن لفت بده (پیش‌فرض ۱ = فوری)",
+            "`تبادل دائمی روشن/خاموش`",
+            "`تبادل دائمی ساعت 0` → ۰=تا ابد، ۲۴=فقط ۲۴ ساعت چک کن",
+            "`تبادل دائمی` → نمایش همین صفحه",
+            "",
+            "💡 فیکس باگ: قبلاً چک دائمی نبود و طرف بعد ۱۵ ثانیه لفت می‌داد",
+            "   الان هر ۱۰-۲۰ ثانیه چک می‌کنیم و «نیومدی» هم هر ۱۰-۲۰ ثانیه دوبار می‌گوید بعد لفت",
+        ])
+
+    def should_watch_joined(self, rec, now=None):
+        """آیا این رکورد جوین‌شده هنوز باید دائمی چک شود؟"""
+        x = self.ex_cfg()
+        if not x.get("permanent_check", True):
+            # اگر چک دائمی خاموش است، فقط تا recheck_hours چک کن
+            max_h = int(x.get("permanent_check_max_hours", 0) or x.get("recheck_hours", 0) or 0)
+            if max_h <= 0:
+                return False
+            now = now or int(time.time())
+            joined_at = int(rec.get("joined_at") or rec.get("created_at") or now)
+            return (now - joined_at) <= max_h * 3600
+        # دائمی روشن
+        max_h = int(x.get("permanent_check_max_hours", 0) or 0)
+        if max_h <= 0:
+            return True  # تا ابد
+        now = now or int(time.time())
+        joined_at = int(rec.get("joined_at") or rec.get("created_at") or now)
+        return (now - joined_at) <= max_h * 3600
+
     def risk_current(self):
         """(درصد_ریسک, جزئیات_هرمورد, آمار_خام) — بر پایه بازه‌ی زمانی تنظیم‌شده.
 
@@ -2094,6 +2319,20 @@ class Engine:
             ("گروه ها", "groups"),
             ("پیش قدم", "go"),
             ("پیشقدم", "go"),
+            ("تطبیقی", "adaptive"),
+            ("حالت تطبیقی", "adaptive"),
+            ("جوین تطبیقی", "adaptive"),
+            ("گپ تطبیقی", "adaptive"),
+            ("فاصله تطبیقی", "adaptive"),
+            ("دائمی", "permanent"),
+            ("چک دائمی", "permanent"),
+            ("نگهبانی دائمی", "permanent"),
+            ("بررسی دائمی", "permanent"),
+            ("اسکن تصادفی", "scan_jitter"),
+            ("تاخیر اسکن", "scan_jitter"),
+            ("تأخیر اسکن", "scan_jitter"),
+            ("فاصله اسکن", "scan_jitter"),
+            ("ضد اسپم", "scan_jitter"),
         )
         sub = rest = ""
         for phrase, canonical in multi:
@@ -2140,6 +2379,7 @@ class Engine:
             "گزارش خلاصه الان": "report_now", "گزارش خلاصه همین الان": "report_now",
             "خلاصه": "report_now",
             "فاصله تبادل": "gap", "زمان تبادل": "gap",
+            "تطبیقی": "adaptive", "حالت تطبیقی": "adaptive", "جوین تطبیقی": "adaptive",
             "بیا": "come", "پیام بیا": "come", "زمان بیا": "cometime",
             "زمان جواب": "replytime", "زمان پاسخ مستقیم": "replytime",
             "replytime": "replytime", "reply_time": "replytime", "reply_delay": "replytime",
@@ -2312,9 +2552,10 @@ class Engine:
                 if sub == "msgno":
                     # پیام ناموفق همیشه پیش‌فرض دارد؛ خاموشی معنا ندارد.
                     return (f"**{when}** — متنی تعیین نکرده‌ای، پس پیش‌فرض "
-                            f"«{DEFAULT_MSG_NO}» می‌رود و زیرش آیدی کانالی که "
-                            "طرف برای گرفتن ممبر ثبت کرده می‌آید. فقط به کسی "
-                            "می‌رود که لینکش را فرستاده یا کانالش قبلاً در "
+                            f"«{DEFAULT_MSG_NO}» + کانال خودت می‌رود (نه کانال طرف). "
+                            "اگر متن سفارشی ثبت کرده باشی، فقط همان متن می‌رود و "
+                            "هیچ لینکی زیرش اضافه نمی‌شود — لینک طرف هرگز اتوماتیک نمی‌آید. "
+                            "فقط به کسی می‌رود که لینکش را فرستاده یا کانالش قبلاً در "
                             "تبادل ثبت شده؛ ریپلای‌های تصادفی جواب نمی‌گیرند.\n\n"
                             f"`{command} متن دلخواهت`\n\n"
                             "می‌توانی از این‌ها هم استفاده کنی:\n"
@@ -2377,6 +2618,38 @@ class Engine:
             x["scan_every_min"] = max(1, (sec + 59) // 60)
             self.st.save()
             return f"🔍 اسکن پیش‌قدم هر **{secs(sec)}**"
+
+        if sub in ("scan_jitter", "jitter"):
+            # ضد اسپم چندگروهی: فقط وقتی ۲ گروه یا بیشتر داری
+            jitter_min = int(x.get("scan_jitter_min_sec", 5) or 5)
+            jitter_max = int(x.get("scan_jitter_max_sec", 15) or 15)
+            groups_cnt = len(x.get("groups") or [])
+            if not rest:
+                if groups_cnt >= 2:
+                    return (f"🔀 ضد اسپم چندگروهی **فعال** (چون {fa(groups_cnt)} گروه داری):\n"
+                            f"بنر اول سر {fa(x.get('scan_every_sec', 30))} ثانیه، دومی {fa(jitter_min)}–{fa(jitter_max)} ثانیه تصادفی بعد\n"
+                            f"تک گروه = بدون تأخیر اضافه (مثل قبل)\n"
+                            f"`تبادل اسکن تصادفی 5 15` برای تغییر")
+                else:
+                    return (f"🔀 ضد اسپم چندگروهی **غیرفعال** (چون {fa(groups_cnt)} گروه داری — تک گروه مثل قبل هر {fa(x.get('scan_every_sec', 30))} ثانیه)\n"
+                            f"اگر ۲ گروه بذاری خودکار فعال میشه: اولی سر ۳۰ ثانیه، دومی ۵–۱۵ ثانیه تصادفی بعد\n"
+                            f"`تبادل اسکن تصادفی 5 15`")
+            rest = rest.replace("ثانیه", "").replace("تصادفی", "").strip()
+            try:
+                ns = [num(v) for v in rest.split()]
+                lo = max(1, min(60, ns[0]))
+                hi = max(lo, min(60, ns[1] if len(ns) > 1 else ns[0]))
+            except (ValueError, IndexError):
+                return "فرمت: `تبادل اسکن تصادفی 5 15` یا `تبادل ضد اسپم 5 15`"
+            x["scan_jitter_min_sec"] = lo
+            x["scan_jitter_max_sec"] = hi
+            self.st.save()
+            if groups_cnt >= 2:
+                return (f"✅ ضد اسپم چندگروهی تنظیم شد: **{fa(lo)}–{fa(hi)} ثانیه** تصادفی بین گروه‌ها\n"
+                        f"الان {fa(groups_cnt)} گروه داری → بنر اول سر {fa(x.get('scan_every_sec', 30))} ثانیه، بقیه هر کدام {fa(lo)}–{fa(hi)}s بعد")
+            else:
+                return (f"✅ تأخیر تصادفی ذخیره شد: **{fa(lo)}–{fa(hi)} ثانیه**\n"
+                        f"الان تک گروه داری، پس فعلاً بدون تأخیر اضافه کار می‌کنه. وقتی ۲ گروه بذاری خودکار فعال میشه.")
 
         if sub in ("scanlimit", "عمق", "عمق اسکن"):
             if not rest:
@@ -2500,19 +2773,24 @@ class Engine:
 
         if sub == "reminder_gap":
             if not rest:
-                return (f"فاصله یادآوری: {fa(x.get('reminder_min_sec', 20))} تا "
-                        f"{fa(x.get('reminder_max_sec', 40))} ثانیه\n"
-                        "`تبادل فاصله یادآوری ۲۰ ۴۰`")
+                return (f"فاصله یادآوری «نیومدی»: {fa(x.get('reminder_min_sec', 10))} تا "
+                        f"{fa(x.get('reminder_max_sec', 20))} ثانیه تصادفی (هر بار رندوم)\n"
+                        "`تبادل فاصله یادآوری ۱۰ ۲۰` — همگام با چک دائمی")
             rest = re.sub(r"\s*(?:ثانیه|ثانیه‌ای)\s*$", "", rest).strip()
             try:
                 ns = [num(v) for v in rest.split()]
                 lo = max(1, ns[0])
                 hi = max(lo, ns[1] if len(ns) > 1 else ns[0])
             except (ValueError, IndexError):
-                return "فرمت: `تبادل فاصله یادآوری ۲۰ ۴۰`"
+                return "فرمت: `تبادل فاصله یادآوری ۱۰ ۲۰`"
             x["reminder_min_sec"], x["reminder_max_sec"] = lo, hi
+            # همگام‌سازی: چک دائمی هم با همین بازه
+            x["check_min_sec"], x["check_max_sec"] = lo, hi
+            x["check_interval_sec"] = hi if lo == hi else 0
+            for r in self.db.ex_list("joined", 200):
+                self.db.ex_set(r["id"], next_check=0)
             self.st.save()
-            return f"🔔 فاصله یادآوری: **{fa(lo)}–{fa(hi)} ثانیه**"
+            return f"🔔 فاصله یادآوری «نیومدی» و چک دائمی: **{fa(lo)}–{fa(hi)} ثانیه تصادفی** — دوبار «نیومدی» بعد لفت، هر بار رندوم"
 
         if sub == "response_delay":
             if not rest:
@@ -2587,14 +2865,14 @@ class Engine:
                     f"فعال‌کردن: `تبادل سقف ساعتی روشن`  ·  تغییر عدد: `تبادل سقف ساعتی 60`")
 
         if sub == "every":
-            lo = max(1, int(x.get("check_min_sec", 15) or 15))
-            hi = max(lo, int(x.get("check_max_sec", 30) or 30))
+            lo = max(1, int(x.get("check_min_sec", 10) or 10))
+            hi = max(lo, int(x.get("check_max_sec", 20) or 20))
             if not rest:
                 if lo == hi:
                     return (f"هر {fa(lo)} ثانیه چک می‌شود\n"
-                            "`تبادل بررسی 15 30` برای حالت تصادفی")
+                            "`تبادل بررسی 10 20` برای حالت تصادفی")
                 return (f"چک عضویت: تصادفی بین {fa(lo)} تا {fa(hi)} ثانیه\n"
-                        "`تبادل بررسی 15 30`")
+                        "`تبادل بررسی 10 20`")
             rest = re.sub(r"\s*(?:ثانیه|ثانیه‌ای)\s*$", "", rest).strip()
             rest = re.sub(r"^(?:تصادفی|نوسانی|رندوم)\s+", "", rest).strip()
             try:
@@ -2602,17 +2880,23 @@ class Engine:
                 lo, hi = max(1, ns[0]), max(1, ns[1] if len(ns) > 1 else ns[0])
                 hi = max(lo, hi)
             except (ValueError, IndexError):
-                return "فرمت: `تبادل بررسی 15 30` یا `تبادل بررسی 20`"
+                return "فرمت: `تبادل بررسی 10 20` یا `تبادل بررسی 20`"
             x["check_min_sec"], x["check_max_sec"] = lo, hi
+            # همگام‌سازی: فاصله یادآوری «نیومدی» هم با همین بازه تصادفی تنظیم می‌شود
+            # تا هر بار که بخواهد بگوید بین همون عدد تصادفی که تنظیم کردی باشد.
+            x["reminder_min_sec"], x["reminder_max_sec"] = lo, hi
             # برای سازگاری با نسخه‌های قدیمی نگه داشته می‌شود؛ موتور جدید
             # همیشه min/max را استفاده می‌کند.
             x["check_interval_sec"] = hi if lo == hi else 0
             # تغییر تنظیم، چک همه موارد انجام‌شده را از نو زمان‌بندی می‌کند.
             for r in self.db.ex_list("joined", 200):
                 self.db.ex_set(r["id"], next_check=0)
+            for r in self.db._x("SELECT * FROM exchange WHERE next_reminder>0 LIMIT 200", (), "all"):
+                self.db.ex_set(r["id"], next_reminder=int(__import__('time').time()) + __import__('random').randint(lo, hi))
             self.st.save()
-            return (f"🔄 چک عضویت: "
-                    f"{'هر ' + fa(lo) + ' ثانیه' if lo == hi else 'تصادفی بین ' + fa(lo) + ' تا ' + fa(hi) + ' ثانیه'}")
+            return (f"🔄 چک عضویت و یادآوری «نیومدی»: "
+                    f"{'هر ' + fa(lo) + ' ثانیه' if lo == hi else 'تصادفی بین ' + fa(lo) + ' تا ' + fa(hi) + ' ثانیه تصادفی — هر بار دوباره رندوم'}\n"
+                    f"• چک دائمی: {fa(lo)}–{fa(hi)}s | • «نیومدی» دوبار بعد لفت، هر بار {fa(lo)}–{fa(hi)}s")
 
         if sub in ("max_reminders", "reminders"):
             if not rest:
@@ -2629,6 +2913,32 @@ class Engine:
             self.st.save()
             return (f"🔔 حداکثر یادآوری: **{fa(v)} بار**"
                     + (" — فقط بررسی بی‌صدا" if v == 0 else ""))
+
+        # ── چک دائمی: فیکس باگ لفت ۱۵ ثانیه‌ای ──
+        if sub in ("permanent", "دائمی", "چک_دائمی", "watch", "نگهبانی"):
+            rest_low = (rest or "").strip().lower()
+            if rest_low in ("on", "روشن", "فعال"):
+                x["permanent_check"] = True
+                x["permanent_check_max_hours"] = 0
+                x["recheck_hours"] = 0
+                self.st.save()
+                return "🔄 چک دائمی **روشن** شد — تا ابد هر ۱۰-۲۰ ثانیه چک می‌کنم، اگر طرف لفت داد فوراً از کانالش لفت می‌دهم.\n" + self.permanent_check_status_text()
+            if rest_low in ("off", "خاموش", "غیرفعال"):
+                x["permanent_check"] = False
+                self.st.save()
+                return "🔄 چک دائمی **خاموش** شد — فقط تا چند ساعت اول چک می‌کنم."
+            if rest_low.startswith(("max ", "سقف ", "ساعت ")):
+                try:
+                    v = max(0, min(720, num(rest_low.split(None,1)[1])))
+                    x["permanent_check_max_hours"] = v
+                    x["recheck_hours"] = v
+                    self.st.save()
+                    if v==0:
+                        return "♾️ چک دائمی بدون محدودیت زمانی — تا ابد چک می‌کنم.\n" + self.permanent_check_status_text()
+                    return f"⏱ چک دائمی تا {fa(v)} ساعت بعد جوین ادامه دارد، بعدش متوقف می‌شود.\n" + self.permanent_check_status_text()
+                except Exception:
+                    return "فرمت: `تبادل دائمی ساعت 0` (۰=تا ابد) یا `تبادل دائمی ساعت 24`"
+            return self.permanent_check_status_text()
 
         if sub in ("report", "report_status"):
             mode = x.get("report_mode", "live")
@@ -2738,6 +3048,92 @@ class Engine:
                 n += 1
             return f"🔄 {fa(n)} تبادل برای چک فوری علامت خورد."
 
+        # ── تطبیقیِ هوشمند: FloodWait → +۱۵ ثانیه، آپ‌تایم طولانی → ۳۰ثانیه→۶۰ثانیه ──
+        if sub in ("adaptive", "تطبیقی", "هوشمند", "auto_gap", "گپ_هوشمند"):
+            rest_low = (rest or "").strip().lower()
+            # روشن/خاموش
+            if rest_low in ("on", "روشن", "فعال"):
+                x["adaptive_on"] = True
+                self.st.save()
+                try:
+                    emin, emax = self.effective_join_gap()
+                    self.join_thr.apply({"min_gap_sec": emin, "max_gap_sec": emax, "max_per_hour": 0})
+                except Exception:
+                    pass
+                return "🧠 تطبیقیِ جوین **روشن** شد.\n" + self.adaptive_status_text()
+            if rest_low in ("off", "خاموش", "غیرفعال"):
+                x["adaptive_on"] = False
+                self.st.save()
+                # برگرد به پایه
+                try:
+                    base_min = int(x.get("min_join_gap_sec", 30) or 30)
+                    base_max = int(x.get("max_join_gap_sec", 60) or 60)
+                    self.join_thr.apply({"min_gap_sec": base_min, "max_gap_sec": base_max, "max_per_hour": 0})
+                except Exception:
+                    pass
+                return "🧠 تطبیقیِ جوین **خاموش** شد — فقط فاصله پایه استفاده می‌شود."
+            if rest_low in ("reset", "ریست", "صفر", "پاک"):
+                x["_adaptive_flood_extra"] = 0
+                x["_adaptive_last_flood"] = 0
+                x["_adaptive_last_decay"] = 0
+                self.st.save()
+                try:
+                    emin, emax = self.effective_join_gap()
+                    self.join_thr.apply({"min_gap_sec": emin, "max_gap_sec": emax, "max_per_hour": 0})
+                except Exception:
+                    pass
+                return "♻️ اضافه Flood صفر شد.\n" + self.adaptive_status_text()
+            # تنظیمات عددی: flood_step, flood_max, decay, uptime_threshold, uptime_extra, uptime_per_hour
+            # مثال: تبادل تطبیقی flood 15 / تبادل تطبیقی max 120 / تبادل تطبیقی decay 60
+            #       تبادل تطبیقی uptime 3 / تبادل تطبیقی uptime_extra 30 / تبادل تطبیقی uptime_per_hour 10
+            if rest_low.startswith(("flood ", "فلاد ")):
+                try:
+                    v = max(1, min(120, num(rest_low.split(None,1)[1])))
+                    x["adaptive_flood_step_sec"] = v
+                    self.st.save()
+                    return f"⚙️ هر FloodWait → +{fa(v)} ثانیه\n" + self.adaptive_status_text()
+                except Exception:
+                    return "فرمت: `تبادل تطبیقی flood 15`"
+            if rest_low.startswith(("max ", "سقف ")):
+                try:
+                    v = max(15, min(600, num(rest_low.split(None,1)[1])))
+                    x["adaptive_flood_max_sec"] = v
+                    self.st.save()
+                    return f"⚙️ سقف اضافه Flood → {fa(v)} ثانیه\n" + self.adaptive_status_text()
+                except Exception:
+                    return "فرمت: `تبادل تطبیقی max 120`"
+            if rest_low.startswith(("decay ", "کاهش ")):
+                try:
+                    v = max(5, min(720, num(rest_low.split(None,1)[1])))
+                    x["adaptive_flood_decay_min"] = v
+                    self.st.save()
+                    return f"⚙️ کاهش خودکار هر {fa(v)} دقیقه\n" + self.adaptive_status_text()
+                except Exception:
+                    return "فرمت: `تبادل تطبیقی decay 60`"
+            if rest_low.startswith(("uptime ", "آپتایم ", "ساعت ")):
+                try:
+                    v = max(1, min(24, num(rest_low.split(None,1)[1])))
+                    x["adaptive_uptime_threshold_hours"] = v
+                    self.st.save()
+                    return f"⚙️ آستانه کندشدن آپ‌تایم → {fa(v)} ساعت\n" + self.adaptive_status_text()
+                except Exception:
+                    return "فرمت: `تبادل تطبیقی uptime 3`"
+            if rest_low.startswith(("uptime_extra ", "extra ", "اضافه ")):
+                try:
+                    # می‌تواند دو عددی باشد: uptime_extra 30 یا extra 30
+                    parts = rest_low.replace("uptime_extra","").replace("extra","").replace("اضافه","").strip()
+                    v = max(0, min(300, num(parts.split()[0])))
+                    x["adaptive_uptime_extra_sec"] = v
+                    if len(parts.split())>1:
+                        v2 = max(0, min(120, num(parts.split()[1])))
+                        x["adaptive_uptime_per_hour_sec"] = v2
+                    self.st.save()
+                    return f"⚙️ اضافه آپ‌تایم تنظیم شد\n" + self.adaptive_status_text()
+                except Exception:
+                    return "فرمت: `تبادل تطبیقی extra 30 10`"
+            # بدون آرگومان: نمایش وضعیت
+            return self.adaptive_status_text()
+
         return (f"زیر‌دستور ناشناخته: `{sub}`\n`تبادل` برای وضعیت • "
                 "`راهنما` برای راهنما")
 
@@ -2748,6 +3144,26 @@ class Engine:
         today = self.db.ex_joins_today()
         # Join روزانه عمداً سقف ندارد.
         groups = x.get("groups") or []
+        # محاسبه فاصله موثر تطبیقی
+        try:
+            f_extra, u_extra, total_extra = self.adaptive_extra()
+            emin, emax = self.effective_join_gap()
+            adaptive_label = f"{fa(emin)}–{fa(emax)} ثانیه (پایه {fa(x['min_join_gap_sec'])}–{fa(x['max_join_gap_sec'])} + تطبیقی {fa(total_extra)})" if x.get("adaptive_on", True) else f"{fa(x['min_join_gap_sec'])}–{fa(x['max_join_gap_sec'])} (تطبیقی خاموش)"
+        except Exception:
+            adaptive_label = f"{fa(x['min_join_gap_sec'])}–{fa(x['max_join_gap_sec'])} ثانیه"
+            f_extra = u_extra = total_extra = 0
+        # برچسب چک دائمی — بدون بک‌اسلش در f-string
+        try:
+            _perm_max = int(x.get('permanent_check_max_hours', 0) or 0)
+        except Exception:
+            _perm_max = 0
+        _perm_on = x.get('permanent_check', True)
+        if _perm_on and _perm_max == 0:
+            perm_label = "♾️ تا ابد"
+        elif _perm_on:
+            perm_label = f"تا {fa(_perm_max)} ساعت"
+        else:
+            perm_label = "خاموش"
         lines = [
             "🔁 تبادل",
             "━━━━━━━━━━━━━━",
@@ -2756,14 +3172,17 @@ class Engine:
             f"کانال من: {ch or 'تنظیم نشده'}",
             f"جوین امروز: {fa(today)} — بدون سقف",
             f"سقف جوین/ساعت: {'روشن' + (' · ' + fa(x.get('hour_cap', 60)) + ' در ساعت' if x.get('hour_cap_on') else '') if x.get('hour_cap_on') else 'خاموش (پیش‌فرض)'}   `تبادل سقف ساعتی`",
-            f"فاصله Join: {fa(x['min_join_gap_sec'])} تا {fa(x['max_join_gap_sec'])} ثانیه",
+            f"فاصله Join پایه: {fa(x['min_join_gap_sec'])} تا {fa(x['max_join_gap_sec'])} ثانیه",
+            f"فاصله موثر (تطبیقی): {adaptive_label}   `تبادل تطبیقی`",
+            f"  • Flood اضافه: {fa(f_extra)}ثانیه | آپ‌تایم اضافه: {fa(u_extra)}ثانیه",
             f"گزارش خصوصی: {'لحظه‌ای' if x.get('report_mode', 'live') == 'live' else ('خلاصه' if x.get('report_mode') == 'summary' else 'خاموش')} در PV",
-            f"پیام عضو‌نشده: حداکثر {fa(max(0, int(x.get('max_reminders', 2) or 0)))} بار؛ بعد از آن لفت",
-            f"فاصله یادآوری: {fa(x.get('reminder_min_sec', 20))} تا {fa(x.get('reminder_max_sec', 40))} ثانیه تصادفی",
-            f"بررسی عضویت: تصادفی {fa(x.get('check_min_sec', 15))} تا {fa(x.get('check_max_sec', 30))} ثانیه",
+            f"پیام عضو‌نشده: حداکثر {fa(max(0, int(x.get('max_reminders', 2) or 0)))} بار «نیومدی» با فاصله تصادفی؛ بعد از آن لفت",
+            f"فاصله یادآوری «نیومدی»: {fa(x.get('reminder_min_sec', 10))} تا {fa(x.get('reminder_max_sec', 20))} ثانیه تصادفی (هر بار دوباره رندوم، همگام با چک دائمی)",
+            f"چک عضویت دائمی: {fa(x.get('check_min_sec', 10))}–{fa(x.get('check_max_sec', 20))} ثانیه | لفت بعد {fa(x.get('max_strikes',1))} بار | {perm_label}   `تبادل دائمی`",
             f"پاسخ بعد از Join واقعی: {fa(x.get('response_delay_sec', 15))} ثانیه",
             f"انتخاب پیام: مورد {fa(x.get('scan_pick', 2) or 2)} از جدیدترین‌ها",
             f"اسکن گروه: هر {secs(max(30, int(x.get('scan_every_sec', 30) or 30)))}",
+            f"ضد اسپم چندگروهی: {'فعال — بنر اول سر ' + fa(x.get('scan_every_sec', 30)) + ' ثانیه، بقیه ' + fa(x.get('scan_jitter_min_sec', 5)) + '–' + fa(x.get('scan_jitter_max_sec', 15)) + ' ثانیه تصادفی بعد' if len(groups) >= 2 else 'غیرفعال (تک گروه) — وقتی ۲ گروه بذاری خودکار فعال میشه'}   `تبادل اسکن تصادفی`",
             f"سن مجاز لینک: حداکثر {fa(max(1, int(x.get('scan_max_age_sec', 300) or 300)) // 60)} دقیقه",
             f"گروه‌های ثبت‌شده: {fa(len(groups))}",
             f"تبادل‌های انجام‌شده: {fa(c.get('joined', 0))}",
@@ -2775,6 +3194,9 @@ class Engine:
             "",
             "🚶 حالت پیش‌قدم:",
             "از هر گروه ثبت‌شده، آخرین پیام دارای لینک خوانده می‌شود و لینک در نوبت Join قرار می‌گیرد.",
+            "",
+            "🔄 فیکس چک دائمی:",
+            "قبلاً بعد ۱۵ ثانیه طرف لفت می‌داد و چک دائمی نبود — الان هر ۱۰-۲۰ ثانیه تا ابد چک می‌کنیم و بعد ۱ بار نبودن فوراً لفت می‌دهیم.",
             "",
             "📌 دستورهای اصلی:",
             "روشن: `تبادل روشن`",
@@ -2789,6 +3211,10 @@ class Engine:
             "گزارش خلاصه: `تنظیم گزارش خلاصه`",
             "گزارش خلاصه همین حالا: `گزارش خلاصه`",
             "فاصله Join: `تبادل فاصله`",
+            "تطبیقی هوشمند: `تبادل تطبیقی` (Flood + آپ‌تایم)",
+            "چک دائمی: `تبادل دائمی` (فیکس ۱۵ ثانیه‌ای)",
+            "بررسی عضویت: `تبادل بررسی ۱۰ ۲۰`",
+            "اخطار لفت: `تبادل اخطار ۱` (۱=فوری)",
             "نوسان یادآوری: `تبادل فاصله یادآوری 5 15`",
             "اسکن فوری: `تبادل اسکن`",
             "ارسال دوباره پیام: `تبادل ارسال شماره`",
@@ -2822,8 +3248,9 @@ class Engine:
         for title, command, key in sections:
             cur = x.get(key) or ""
             if not cur and key == "msg_no":
-                cur = (f"{DEFAULT_MSG_NO} (پیش‌فرض) + آیدی کانال طرف، زیر متن"
-                       " — فقط برای کسی که کانالش ثبت شده است")
+                cur = (f"{DEFAULT_MSG_NO} (پیش‌فرض) + کانال خودت، زیر متن"
+                       " — فقط برای کسی که کانالش ثبت شده است؛ "
+                       "اگر متن سفارشی ثبت کنی، فقط همان متن می‌رود")
             lines += ["", title, "دستور آماده برای کپی:", f"`{command}`",
                       f"متن فعلی: {cur or 'تنظیم نشده'}"]
         lines += ["", "فرمان عمومی «تبادل پیام» متن موفقیت هر دو نوع Join را تنظیم می‌کند.",
@@ -2890,18 +3317,32 @@ class Engine:
     def ex_render(self, key, name="", channel=""):
         """متن کاربر را با مقادیر واقعی پر می‌کند. خالی = جوابی نده.
         تنها استثنا msg_no است: اگر متنی ثبت نشده باشد، پیش‌فرض
-        «نیومدی» فرستاده می‌شود."""
-        t = (self.ex_cfg().get(key) or "").strip()
+        «نیومدی» + کانال خودم (standard/vip) فرستاده می‌شود.
+        وقتی متن سفارشی msg_no ثبت شده باشد، فقط همان متن می‌رود و
+        هیچ لینکی زیرش اضافه نمی‌شود — لینک طرف هرگز اتوماتیک نمی‌آید."""
+        raw = (self.ex_cfg().get(key) or "").strip()
+        is_custom_msg_no = bool(raw) and key == "msg_no"
+        t = raw
         if not t and key == "msg_no":
             t = DEFAULT_MSG_NO
         if not t:
             return ""
+        # کانال خودم: standard اولویت، بعد vip
+        mych = (self.st.prof("standard")["channel"] or
+                self.st.prof("vip")["channel"] or "").strip()
         try:
-            return (t.replace("{name}", name or "")
-                     .replace("{channel}", channel or "")
-                     .replace("{mychannel}", self.st.prof("standard")["channel"] or ""))
+            rendered = (t.replace("{name}", name or "")
+                         .replace("{channel}", channel or "")
+                         .replace("{mychannel}", mych or ""))
         except Exception:
-            return t
+            rendered = t
+        rendered = rendered.strip()
+        # اگر msg_no سفارشی نیست (یعنی پیش‌فرض)، کانال خودم را زیرش بیاور
+        # نه کانال طرف. اگر سفارشی است، هیچ لینکی اتوماتیک اضافه نکن.
+        if key == "msg_no" and not is_custom_msg_no:
+            if mych and mych not in rendered:
+                rendered = f"{rendered}\n{mych}"
+        return rendered
 
     def ex_list_text(self, status=None):
         rows = self.db.ex_list(status, 25)
@@ -3387,11 +3828,21 @@ class Engine:
         ]
 
         if exchange["enabled"]:
+            try:
+                _fex, _uex, _tex = self.adaptive_extra()
+                _emin, _emax = self.effective_join_gap()
+                _adapt_str = f" +{fa(_tex)} تطبیقی" if _tex else ""
+            except Exception:
+                _emin = int(exchange.get("min_join_gap_sec",30) or 30)
+                _emax = int(exchange.get("max_join_gap_sec",60) or 60)
+                _adapt_str = ""
+                _tex = 0
             lines += [
                 "",
                 "━━━━━━━━━━━━━━",
                 f"🔁 تبادل: روشن  ·  گروه‌ها: {fa(len(exchange.get('groups') or []))}",
-                f"⏱ فاصله جوین: {fa(exchange['min_join_gap_sec'])}–{fa(exchange['max_join_gap_sec'])} ثانیه",
+                f"⏱ فاصله جوین: {fa(_emin)}–{fa(_emax)} ثانیه (پایه {fa(exchange['min_join_gap_sec'])}–{fa(exchange['max_join_gap_sec'])}{_adapt_str})",
+                f"🧠 تطبیقی: {'روشن' if exchange.get('adaptive_on',True) else 'خاموش'} · اضافه Flood {fa(exchange.get('_adaptive_flood_extra',0))}ثانیه · آپ‌تایم {fa(int((int(time.time())-self.started)//3600))}ساعت",
                 f"🔍 اسکن گروه: هر {secs(max(30, int(exchange.get('scan_every_sec', 30) or 30)))}",
                 f"🤝 جوین امروز: {fa(ex_counts.get('joined', 0))}",
                 f"⏳ در صف Join: {fa(ex_counts.get('approved', 0))}",
@@ -4354,6 +4805,10 @@ async def connect_and_run(eng, creds):
             w = getattr(e, "seconds", 60)
             eng.join_thr.penalize(w)
             eng.db.log("warn", "ex_flood", f"join {link}: {w}s")
+            try:
+                eng.adaptive_on_flood(w)
+            except Exception:
+                pass
             return False, f"FloodWait {w}s", ""
         except Exception as e:
             return False, f"{type(e).__name__}: {e}", ""
@@ -4369,6 +4824,10 @@ async def connect_and_run(eng, creds):
             w = getattr(e, "seconds", 60)
             eng.join_thr.penalize(w)
             eng.db.log("warn", "ex_flood", f"leave {link}: {w}s")
+            try:
+                eng.adaptive_on_flood(w)
+            except Exception:
+                pass
             return False, f"FloodWait {w}s"
         except Exception as e:
             return False, f"{type(e).__name__}: {e}"
@@ -4417,18 +4876,20 @@ async def connect_and_run(eng, creds):
         return 999999999
 
     def reminder_delay():
-        """فاصله‌ی تصادفی بین دو پیام «نیومدی»؛ پیش‌فرض ۲۰ تا ۴۰ ثانیه.
+        """فاصله‌ی تصادفی بین دو پیام «نیومدی»؛ پیش‌فرض ۱۰ تا ۲۰ ثانیه تصادفی، همگام با چک دائمی.
+        هر بار که بخواهد بگوید بین همون عدد تصادفی که تنظیم کردی (۱۰–۲۰) است، دوبار می‌گوید بعد لفت.
         دو پیام عضو‌نشده هرگز پشت سر هم فرستاده نمی‌شوند."""
         x = eng.ex_cfg()
-        lo = max(1, int(x.get("reminder_min_sec", 20) or 20))
-        hi = max(lo, int(x.get("reminder_max_sec", 40) or 40))
+        # اگر کاربر فقط چک را تنظیم کرده، یادآوری هم از همان بازه استفاده کند
+        lo = max(1, int(x.get("reminder_min_sec", x.get("check_min_sec", 10)) or 10))
+        hi = max(lo, int(x.get("reminder_max_sec", x.get("check_max_sec", 20)) or 20))
         return random.randint(lo, hi)
 
     def membership_check_delay():
         """فاصله بی‌صدای بررسی عضویت؛ هر بار دوباره تصادفی انتخاب می‌شود."""
         x = eng.ex_cfg()
-        lo = max(1, int(x.get("check_min_sec", 15) or 15))
-        hi = max(lo, int(x.get("check_max_sec", 30) or 30))
+        lo = max(1, int(x.get("check_min_sec", 10) or 10))
+        hi = max(lo, int(x.get("check_max_sec", 20) or 20))
         return random.randint(lo, hi)
 
     def response_delay_seconds():
@@ -4483,16 +4944,20 @@ async def connect_and_run(eng, creds):
         return random.randint(lo, hi)
 
     async def send_not_joined_reminder(rec):
-        """متن msg_no را روی پیام اصلی می‌فرستد؛ زیر متن، آیدی کانالی که
-        طرف برای گرفتن ممبر ثبت کرده هم می‌آید. اگر متنی تنظیم نشده
-        باشد، پیش‌فرض «نیومدی» فرستاده می‌شود."""
+        """متن msg_no را روی پیام اصلی می‌فرستد.
+        - اگر متن سفارشی msg_no ثبت شده باشد: فقط همان متن می‌رود،
+          هیچ لینکی (نه کانال طرف، نه کانال خودم) زیرش اضافه نمی‌شود.
+        - اگر متنی ثبت نشده باشد: پیش‌فرض «نیومدی» + کانال خودم
+          (standard/vip) فرستاده می‌شود — نه کانال طرف.
+        این رفتار باگ قبلی که لینک طرف (@SWAG_815) را زیر پیام می‌گذاشت
+        و پیش‌فرض همیشه روشن بود را برطرف می‌کند."""
         x = eng.ex_cfg()
         if not x["reply"] or not rec:
             return False
+        # لینک طرف فقط برای placeholder {channel} اگر کاربر خودش خواسته باشد
+        # استفاده می‌شود؛ اما auto-append لینک طرف هرگز انجام نمی‌شود.
         link = (rec.get("link") or "").strip()
         body = eng.ex_render("msg_no", rec.get("peer_name") or "", link)
-        if body and link and link not in body:
-            body = f"{body}\n{link}"
         chat, mid = rec.get("src_chat"), rec.get("src_msg")
         if not body or not chat or not mid:
             return False
@@ -4660,13 +5125,13 @@ async def connect_and_run(eng, creds):
                     used = k
                     break
             # اگر کاربر متنی ثبت نکرد، هیچ پیام خودکاری ارسال نشود
-            # (msg_no پیش‌فرضِ «نیومدی» را از ex_render می‌گیرد).
+            # (msg_no پیش‌فرضِ «نیومدی» + کانال خودم را از ex_render می‌گیرد).
             if not t:
                 return False
-            # متن «عضو نشدی» همیشه آیدی کانالی که طرف برای گرفتن ممبر
-            # ثبت کرده را زیر متن می‌آورد تا معلوم باشد کدام تبادل meant است.
-            if key == "msg_no" and channel and channel not in t:
-                t = f"{t}\n{channel}"
+            # وقتی msg_no سفارشی ثبت شده باشد، فقط همان متن می‌رود و
+            # هیچ لینکی زیرش اضافه نمی‌شود. وقتی پیش‌فرض است، ex_render
+            # خودش کانال من را اضافه کرده (نه کانال طرف).
+            # باگ قبلی که @SWAG_815 (کانال طرف) را زیر پیام می‌گذاشت حذف شد.
             # پاسخ‌های مستقیم رویداد (msg_no/msg_wait/msg_nolink) قبل از
             # ارسال یک تأخیر انسانی ۵–۱۸ ثانیه می‌گیرند تا شکل رباتی نداشته باشد.
             # پیام موفق (msg_ok/msg_come) مسیر خودش را دارد (reply_joined با
@@ -4741,8 +5206,9 @@ async def connect_and_run(eng, creds):
                               replied=0, reminders=old_count,
                               note="عضو نیست — دو یادآوری فاصله‌دار، بعد لفت")
             eng.log("info", "ex_notmember", sender_name)
-            # اولین «نیومدی» همین حالا می‌رود؛ say خودش آیدی کانالِ ثبت‌شده‌ی
-            # طرف را زیر متن می‌گذارد و قبل از ارسال تأخیر انسانی می‌گیرد.
+            # اولین «نیومدی» همین حالا می‌رود؛ اگر متن سفارشی ثبت شده باشد
+            # فقط همان متن می‌رود، وگرنه پیش‌فرض «نیومدی» + کانال خودم.
+            # لینک طرف هرگز اتوماتیک زیر پیام نمی‌آید (باگ @SWAG_815 فیکس شد).
             sent_now = await say("msg_no", link) if send_now else False
             if rec and rec.get("id"):
                 # زمان‌بندی یادآوری بعدی از لحظه‌ی ارسالِ واقعی همین پیام
@@ -4941,8 +5407,22 @@ async def connect_and_run(eng, creds):
 
             if newest:
                 last[key] = newest
-            # کوتاه نگه‌دار تا فرمان پنل معطل اسکن چند گروه نشود.
-            await asyncio.sleep(0.5)
+            # ضد اسپم چندگروهی: فقط وقتی ۲ گروه یا بیشتر داری، بین اسکن گروه‌ها ۵–۱۵ ثانیه تصادفی صبر کن
+            # تا هر دو گروه سر ۳۰ ثانیه با هم اسکن نشن و اکانت ریپورت نشه.
+            # تک گروه = مثل قبل ۰.۵ ثانیه.
+            groups_count = len(x.get("groups") or [])
+            if groups_count >= 2 and not manual:
+                jitter_min = max(1, int(x.get("scan_jitter_min_sec", 5) or 5))
+                jitter_max = max(jitter_min, int(x.get("scan_jitter_max_sec", 15) or 15))
+                # اگر گروه آخر نیست، تأخیر تصادفی
+                # (برای اینکه بنر اول سر ۳۰ ثانیه، دومی ۵–۱۵ ثانیه بعد بره)
+                if g != x["groups"][-1]:
+                    await asyncio.sleep(random.randint(jitter_min, jitter_max))
+                else:
+                    await asyncio.sleep(0.5)
+            else:
+                # تک گروه یا حالت دستی: کوتاه نگه‌دار
+                await asyncio.sleep(0.5)
 
         x["scan_last"] = last
         eng.st.save()
@@ -5080,13 +5560,21 @@ async def connect_and_run(eng, creds):
                                       next_reminder=int(now2 + membership_check_delay()),
                                       note="بررسی عضویت نامشخص است")
 
-                # ۳) چک دوره‌ای: طرف هنوز عضو کانال من هست؟
-                # زمان هر بررسی از نو و تصادفی بین ۱۵ تا ۳۰ ثانیه انتخاب می‌شود.
+                # ۳) چک دوره‌ای دائمی: طرف هنوز عضو کانال من هست؟
+                # فیکس باگ: قبلاً چک دائمی نبود و طرف بعد ۱۵ ثانیه لفت می‌داد.
+                # الان هر ۱۰–۲۰ ثانیه تصادفی چک می‌کنیم تا ابد (یا تا سقف ساعت).
+                # بعد ۱ بار نبودن فوراً لفت می‌دهیم.
                 for rec in eng.db.ex_due(int(time.time()), 5):
                     if not rec["peer_id"]:
                         now_no_peer = int(time.time())
                         eng.db.ex_set(rec["id"], last_check=now_no_peer,
                                       next_check=now_no_peer + membership_check_delay())
+                        continue
+                    # اگر چک دائمی خاموش یا مهلتش گذشته → دیگر چک نکن
+                    if not eng.should_watch_joined(rec):
+                        eng.db.ex_set(rec["id"], last_check=int(time.time()),
+                                      next_check=0,
+                                      note="پایان نگهبانی دائمی (سقف ساعت)")
                         continue
                     # رکوردهای دارای نوبتِ یادآوری فعال (ادعای «جوین شدم» بدون
                     # عضویت واقعی) را حلقه‌ی یادآوری مدیریت می‌کند: دو پیام
@@ -5182,7 +5670,16 @@ async def connect_and_run(eng, creds):
                             f"#{rec['id']} {rec['link']} {err}")
                     await asyncio.sleep(3)
 
-                # ۲) جوین تأییدشده‌ها
+                # ۲) جوین تأییدشده‌ها — تطبیقی + سقف ساعتی
+                # هر بار فاصله موثر (پایه + Flood + آپ‌تایم) را حساب و به throttle بده
+                try:
+                    eng.adaptive_maybe_decay()
+                    emin, emax = eng.effective_join_gap()
+                    # فقط اگر با مقدار فعلی فرق دارد، apply کن تا next_gap الکی عوض نشود
+                    if (emin != eng.join_thr.min_gap or emax != eng.join_thr.max_gap):
+                        eng.join_thr.apply({"min_gap_sec": emin, "max_gap_sec": emax, "max_per_hour": 0})
+                except Exception:
+                    pass
                 if eng.join_thr.wait_time() <= 0 and joins_left_today() > 0:
                     # ── سقف جوین/ساعت (محدودیت آهسته، خاموش پیش‌فرض) ──
                     hw = eng.hour_cap_wait()
