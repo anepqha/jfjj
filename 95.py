@@ -689,6 +689,74 @@ class DB:
 # ─────────────────────────────────────────────
 #  کنترل نرخ ارسال
 # ─────────────────────────────────────────────
+class CheckGate:
+    """پاس‌گاه سراسری درخواست‌های «بررسی عضویت» (GetParticipantRequest).
+
+    چک دائمیِ هر رکورد هر ۱۰–۲۰ ثانیه با N رکورد یعنی N×۳–۶ درخواست در
+    دقیقه — و سه مسیر همزمان (حلقه‌ی یادآوری، چک دوره‌ای، پیام ورودی)
+    بدون هماهنگی می‌زدند؛ نتیجه‌اش FloodWait «بی‌دلیل» بود. این پاس‌گاه
+    همه‌ی مسیرها را از یک دریچه رد می‌کند:
+      • حداقل فاصله بین دو درخواست؛ با تعداد رکوردها خودکار بلندتر می‌شود
+      • روی FloodWait، کل بررسی‌ها تا پایان سقف متوقف می‌شود (نه اینکه
+        بقیه‌ی رکوردها هم پشت‌سرهم فلود بخورند)
+      • بعد از چند دقیقه بدون Flood، فاصله کم‌کم برمی‌گردد
+    """
+
+    def __init__(self, base_gap=1.5):
+        self.base_gap = float(base_gap)
+        self.flood_extra = 0.0
+        self.last = 0.0
+        self.cooldown_until = 0.0
+        self.last_flood = 0.0
+        self.last_decay = 0.0
+
+    def gap(self):
+        return self.base_gap + self.flood_extra
+
+    def wait(self, now=None):
+        now = now if now is not None else time.time()
+        if now < self.cooldown_until:
+            return self.cooldown_until - now
+        return max(0.0, (self.last + self.gap()) - now)
+
+    def record(self, now=None):
+        now = now if now is not None else time.time()
+        self.last = now
+
+    def penalize(self, sec, now=None):
+        """FloodWait خورد → سقف سراسری + فاصله‌ی بلندتر دائمی (تا سقف ۲۰ث)."""
+        now = now if now is not None else time.time()
+        w = float(sec)
+        self.flood_extra = min(20.0, self.flood_extra + 1.5)
+        self.cooldown_until = max(self.cooldown_until, now + w + 2.0)
+        self.last_flood = now
+        self.last_decay = now
+
+    def set_load(self, records):
+        """با رکوردهای بیشتر، فاصله‌ی پایه بلندتر — پخش عادلانه‌ی چک.
+        ۱۰ رکورد → ~۶ثانیه بین درخواست‌ها، ۵۰ رکورد → سقف ۸ ثانیه.
+        یعنی هر رکورد عملاً هر (records × gap) ثانیه یک‌بار چک می‌شود."""
+        n = max(0, int(records))
+        self.base_gap = min(8.0, max(1.5, 0.6 * n))
+
+    def maybe_decay(self, now=None):
+        """هر ۵ دقیقه بدون Flood، ۱ ثانیه از فاصله‌ی اضافه کم کن."""
+        now = now if now is not None else time.time()
+        if self.flood_extra <= 0:
+            return
+        if self.last_flood and now - self.last_flood < 300:
+            return
+        if (self.last_decay or self.last_flood) and \
+                now - (self.last_decay or self.last_flood) < 300:
+            return
+        self.flood_extra = max(0.0, self.flood_extra - 1.0)
+        self.last_decay = now
+
+    def blocked(self, now=None):
+        now = now if now is not None else time.time()
+        return now < self.cooldown_until
+
+
 class Throttle:
     def __init__(self, p):
         self.apply(p)
@@ -4374,6 +4442,8 @@ async def connect_and_run(eng, creds):
             pass
 
     _warn_check = {"last": 0}
+    _warn_check_flood = {"last": 0}
+    check_gate = CheckGate()
 
     async def warn_membership_check_broken(now):
         """هشدارِ یک‌بار در ۱۰ دقیقه: چک عضویت مدتی است بی‌نتیجه است.
@@ -4754,7 +4824,8 @@ async def connect_and_run(eng, creds):
     #  تبادل دوطرفه
     # ══════════════════════════════════════════════════
     async def peer_in_my_channel(user_id):
-        """عضو کانال عادی یا VIP هست؟ True / False / None(نامشخص)"""
+        """عضو کانال عادی یا VIP هست؟ True / False / None(نامشخص)
+        همه‌ی درخواست‌ها از CheckGate رد می‌شوند تا فلود «الکی» نسازد."""
         if not user_id:
             return None
         chans = []
@@ -4766,13 +4837,32 @@ async def connect_and_run(eng, creds):
             return None
         saw_false = False
         for ch in chans:
+            # پاس‌گاه سراسری: فلود بلند → درخواست نزن اصلاً؛ کوتاه → صبر کن
+            w = check_gate.wait()
+            if w > 45:
+                return None
+            if w > 0:
+                await asyncio.sleep(w)
+            check_gate.record()
             try:
                 await client(GetParticipantRequest(ch, user_id))
                 return True
             except UserNotParticipantError:
                 saw_false = True
             except FloodWaitError as e:
-                eng.thr["standard"].penalize(getattr(e, "seconds", 60))
+                w = getattr(e, "seconds", 60)
+                check_gate.penalize(w)
+                eng.thr["standard"].penalize(w)
+                eng.db.log("warn", "ex_check_flood", f"{ch}: {w}s")
+                # فلودِ چک یعنی کل مسیر بررسی دارد قیچی می‌شود — به
+                # صاحب‌حساب بگو (حداکثر هر ۱۰ دقیقه یک‌بار).
+                nowf = int(time.time())
+                if w >= 60 and nowf - int(_warn_check_flood["last"] or 0) > 600:
+                    _warn_check_flood["last"] = nowf
+                    await note(f"⏳ FloodWait {secs(w)} روی بررسی عضویت — "
+                               "چک‌ها تا پایانش متوقف می‌شوند و بعد خودکار "
+                               "ادامه می‌دهند. اگر زیاد تکرار شد، «تبادل بررسی» "
+                               "را بلندتر بگذار یا تعداد تبادل‌های فعال را کم کن.")
                 return None
             except Exception as e:
                 eng.log("warn", "ex_check", f"{ch}: {type(e).__name__}: {e}")
@@ -5538,6 +5628,14 @@ async def connect_and_run(eng, creds):
                 if not x["enabled"]:
                     await asyncio.sleep(20)
                     continue
+                # پاس‌گاه ضد-فلود: با تعداد رکوردهای جوین‌شده، فاصله‌ی
+                # بین درخواست‌های بررسی خودکار تنظیم می‌شود و اگر مدتی
+                # Flood نخورده باشد، کم‌کم برمی‌گردد.
+                try:
+                    check_gate.set_load(len(eng.db.ex_list("joined", 500)))
+                    check_gate.maybe_decay()
+                except Exception:
+                    pass
                 # ── یادآوری عضو‌نشده: دو پیام «نیومدی» با فاصله‌ی تصادفی ──
                 # (پیش‌فرض ۲۰ تا ۴۰ ثانیه) و بعد از آن، اگر طرف هنوز
                 # نیامده باشد، لفت از کانالش (یا لغو تبادلِ هنوز انجام‌نشده).
