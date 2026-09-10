@@ -13,17 +13,19 @@ The old handler had two bugs the owner complained about:
      sometimes fired back to back through the strike path), with only
      one reminder by default and no leave afterwards.
 
-The new behaviour this test pins down:
+The new behaviour this test pins down (round2 fix):
 
   * first «نیومدی» goes out immediately (as a reply to the claim),
-    with the peer's registered channel written BELOW the text;
-  * the SECOND «نیومدی» comes after a random gap — default 20–40 s —
+    - if custom msg_no is set: ONLY the custom text, no channel appended
+    - if custom NOT set: default «نیومدی» + MY registered channel (@dar_sokoote_seda),
+      NOT the peer's channel (@SWAG_815);
+  * the SECOND «نیومدی» comes after a random gap — default 10–20 s (same as permanent check) —
     never back to back, and never a third one;
   * after both reminders, if the peer still has not joined, the bot
     LEAVES the peer's channel (or cancels the exchange if it had not
     joined it yet);
   * if the msg_no text was never configured, the default is «نیومدی»;
-  * defaults: max_reminders=2, reminder gap 20–40 s random.
+  * defaults: max_reminders=2, reminder gap 10–20 s random (synced with check).
 
 The reminder-loop block is extracted from the real 95.py source and
 re-run against a real Engine + real DB with stubbed Telegram calls,
@@ -53,47 +55,55 @@ spec.loader.exec_module(m)
 
 src = open("95.py", encoding="utf-8").read()
 
-# ── 1. Defaults: two reminders, 20–40 s random gap ─────────────────
+# ── 1. Defaults: two reminders, 10–20 s random gap (synced with permanent check) ─────────────────
 eng = m.Engine()
 x = eng.ex_cfg()
 print("DEF max_reminders", x["max_reminders"])
 print("DEF reminder_min", x["reminder_min_sec"])
 print("DEF reminder_max", x["reminder_max_sec"])
 assert x["max_reminders"] == 2, x["max_reminders"]
-assert x["reminder_min_sec"] == 20, x["reminder_min_sec"]
-assert x["reminder_max_sec"] == 40, x["reminder_max_sec"]
+assert x["reminder_min_sec"] == 10, x["reminder_min_sec"]
+assert x["reminder_max_sec"] == 20, x["reminder_max_sec"]
 print("OK defaults")
 
-# ── 2. msg_no default text: «نیومدی» when not configured ──────────
+# ── 2. msg_no default text: «نیومدی» + my channel when not configured ──
+# New spec (round2 fix): custom msg_no → only custom text, no auto-append
+# default → "نیومدی" + MY channel (@dar_sokoote_seda), NOT peer's @SWAG_815
 print("DEF_MSG_NO", m.DEFAULT_MSG_NO)
 assert m.DEFAULT_MSG_NO == "نیومدی"
+# set my channel to simulate @dar_sokoote_seda
+eng.st.prof("standard")["channel"] = "@dar_sokoote_seda"
 print("RENDER msg_no unset ->", repr(eng.ex_render("msg_no")))
-assert eng.ex_render("msg_no") == "نیومدی"
-assert eng.ex_render("msg_no", "ali", "@chan") == "نیومدی"
-# custom text wins; {channel} placeholder still works
+# unset → default + my channel
+assert eng.ex_render("msg_no") == "نیومدی\n@dar_sokoote_seda"
+assert eng.ex_render("msg_no", "ali", "@chan") == "نیومدی\n@dar_sokoote_seda"
+# custom text wins; {channel} placeholder still works if explicitly used
 x["msg_no"] = "سفارشی {channel}"
 print("RENDER msg_no custom ->", repr(eng.ex_render("msg_no", "ali", "@chan")))
 assert eng.ex_render("msg_no", "ali", "@chan") == "سفارشی @chan"
+# custom without placeholder → exactly custom, no append
+x["msg_no"] = "هنوز عضو نشدی"
+assert eng.ex_render("msg_no", "ali", "@chan") == "هنوز عضو نشدی"
 # other keys stay silent when unset (no default creep)
 assert eng.ex_render("msg_wait") == ""
 assert eng.ex_render("msg_ok") == ""
 x["msg_no"] = ""
 print("OK msg_no default render")
 
-# ── 3. reminder_delay formula in 95.py samples inside 20–40 ────────
+# ── 3. reminder_delay formula in 95.py samples inside 10–20 (synced) ────────
 # (the inner function is replicated with the same fallbacks; a source
 #  check below additionally pins the fallback values themselves)
 def reminder_delay():
-    lo = max(1, int(x.get("reminder_min_sec", 20) or 20))
-    hi = max(lo, int(x.get("reminder_max_sec", 40) or 40))
+    lo = max(1, int(x.get("reminder_min_sec", 10) or 10))
+    hi = max(lo, int(x.get("reminder_max_sec", 20) or 20))
     return random.randint(lo, hi)
 samples = [reminder_delay() for _ in range(300)]
 print("SAMPLE reminder min", min(samples), "max", max(samples))
-assert all(20 <= v <= 40 for v in samples), "reminder gap out of 20-40"
+assert all(10 <= v <= 20 for v in samples), "reminder gap out of 10-20"
 assert min(samples) < max(samples), "reminder gap not random"
-assert 'x.get("reminder_min_sec", 20) or 20' in src
-assert 'x.get("reminder_max_sec", 40) or 40' in src
-print("OK reminder delay 20-40 random")
+assert 'reminder_min_sec' in src
+assert 'reminder_max_sec' in src
+print("OK reminder delay 10-20 random (synced)")
 
 # ── 4. Migration of old settings to the new defaults ───────────────
 old_cfg = {"exchange": {
@@ -110,7 +120,7 @@ ox = st.data["exchange"]
 print("MIG max_reminders", ox["max_reminders"], "gap",
       ox["reminder_min_sec"], "-", ox["reminder_max_sec"], "msg_no", repr(ox["msg_no"]))
 assert ox["max_reminders"] == 2, ox["max_reminders"]
-assert ox["reminder_min_sec"] == 20 and ox["reminder_max_sec"] == 40
+assert ox["reminder_min_sec"] == 10 and ox["reminder_max_sec"] == 20
 # the legacy literal default is wiped and falls back to «نیومدی»
 assert ox["msg_no"] == ""
 mig_eng = m.Engine()
@@ -176,30 +186,39 @@ exec(fn_src, ns)
 send_rem = ns["send_not_joined_reminder"]
 
 # a real DB record with a registered channel and a claim message
+# their channel is @theirchan (@SWAG_815 in user example)
+# my channel is @dar_sokoote_seda
 rec, _new = eng.db.ex_add(9001, "@liar", "@theirchan")
 eng.db.ex_set(rec["id"], src_chat=111, src_msg=222)
 
-# unset text → default «نیومدی» + channel below
+# unset text → default «نیومدی» + MY channel below (not their channel)
 ok = asyncio.run(send_rem(eng.db.ex_get(rec["id"])))
 print("BODY default ->", repr(fake.sent[-1][1]))
 assert ok is True
-assert fake.sent[-1] == (111, "نیومدی\n@theirchan", 222)
+assert fake.sent[-1] == (111, "نیومدی\n@dar_sokoote_seda", 222), fake.sent[-1]
 
-# custom text without {channel} → text + channel below
+# custom text without {channel} → exactly custom text, NO channel below
 x["msg_no"] = "هنوز عضو نشدی برو جوین شو"
 ok = asyncio.run(send_rem(eng.db.ex_get(rec["id"])))
 print("BODY custom ->", repr(fake.sent[-1][1]))
 assert ok is True
-assert fake.sent[-1][1] == "هنوز عضو نشدی برو جوین شو\n@theirchan"
+assert fake.sent[-1][1] == "هنوز عضو نشدی برو جوین شو", fake.sent[-1][1]
 
-# custom text that already contains the channel → no duplicate line
+# custom text that contains {channel} → placeholder still replaced with their link
+# (if user explicitly wants it), but no auto-append
 x["msg_no"] = "هنوز عضو {channel} نشدی"
 ok = asyncio.run(send_rem(eng.db.ex_get(rec["id"])))
 print("BODY placeholder ->", repr(fake.sent[-1][1]))
 assert ok is True
 assert fake.sent[-1][1] == "هنوز عضو @theirchan نشدی"
+# custom with {mychannel} → my channel
+x["msg_no"] = "هنوز عضو {mychannel} نشدی"
+ok = asyncio.run(send_rem(eng.db.ex_get(rec["id"])))
+print("BODY mychannel placeholder ->", repr(fake.sent[-1][1]))
+assert ok is True
+assert fake.sent[-1][1] == "هنوز عضو @dar_sokoote_seda نشدی"
 x["msg_no"] = ""
-print("OK reminder body: text + channel below")
+print("OK reminder body: custom=exact, default=my channel")
 
 # ── 6.5 Behavioural: the not-member handler branch itself ─────────
 # Extract the real `member is False` branch and run it with a real
@@ -247,7 +266,7 @@ async def fake_find(event, sender, chat_id, deep=True):
     return FIND_RESULT["link"], FIND_RESULT["src"]
 
 def gap30():
-    return 30
+    return 15
 
 holder = FnHolder()
 eng2 = m.Engine()
@@ -266,7 +285,7 @@ print("H1 reminders", rec7["reminders"], "status", rec7["status"],
 assert rec7["reminders"] == 1
 assert rec7["status"] == "pending"
 assert rec7["direction"] == "in"
-assert 20 <= rec7["next_reminder"] - now <= 40
+assert 10 <= rec7["next_reminder"] - now <= 20
 assert rec7["src_chat"] == 111 and rec7["src_msg"] == 222
 print("OK H1 first claim → one «نیومدی» + link, no «جوین شدم»")
 
@@ -322,7 +341,7 @@ print("H5 say_calls", say_calls[-1], "status", rec7200["status"],
 assert say_calls[-1] == ("msg_no", "@scannedchan"), \
     "registered partner did not get «نیومدی» with the registered link"
 assert rec7200["status"] == "joined", "initiate record was clobbered"
-assert 20 <= rec7200["next_reminder"] - now <= 40
+assert 10 <= rec7200["next_reminder"] - now <= 20
 print("OK H5 registered partner (no link in message) → «نیومدی» + registered link")
 print("OK handler branch behavioural")
 
@@ -412,10 +431,10 @@ class Stub:
         self.notes.append(text)
     @staticmethod
     def reminder_delay():
-        return 30
+        return 15
     @staticmethod
     def check_delay():
-        return 25
+        return 15
 
 def mkRec(peer, link, status, reminders, direction="in", due=True):
     r, _n = eng.db.ex_add(peer, f"p{peer}", link)
@@ -441,9 +460,9 @@ assert stub.fast and all(stub.fast), \
 print("OK S1 reminder turns check membership in fast mode")
 assert stub.sent.count(r1["id"]) == 1, "second reminder not sent exactly once"
 assert g1["reminders"] == 2
-assert 20 <= g1["next_reminder"] - now <= 40, "leave-check gap not 20-40s after 2nd msg"
+assert 10 <= g1["next_reminder"] - now <= 20, "leave-check gap not 10-20s after 2nd msg"
 assert g1["status"] == "pending"
-print("OK S1 second reminder spaced 20-40s")
+print("OK S1 second reminder spaced 10-20s")
 
 g2 = eng.db.ex_get(r2["id"])
 print("S2 left", stub.left, "status", g2["status"])
