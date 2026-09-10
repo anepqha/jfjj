@@ -221,8 +221,8 @@ check(r is None, "G5: فلود → None (نامشخص)")
 flood_notes = [t for t in hns["notes"] if "FloodWait" in t]
 check(flood_notes, "G5: برای فلود ≥۶۰ث به صاحب‌حساب نوتیف رفت")
 check(gate.blocked(), "G5: گیت بعد از فلود بسته شد (سقف سراسری)")
-check(eng.thr["standard"].penalties == [90],
-      "G5: تروتیل ارسال هم جریمه شد (رفتار محافظه‌کارانه قبلی حفظ است)")
+check(eng.thr["standard"].penalties == [],
+      "G5: فلودِ چک دیگر تروتیل «ارسال» را جریمه نمی‌کند (فریز ارسال فیکس شد)")
 kinds = [row["kind"] for row in eng.db.recent(5)]
 check("ex_check_flood" in kinds, "G5: فلود چک در events لاگ شد")
 
@@ -266,6 +266,10 @@ check(src.count("check_gate.wait()") >= 1 and "check_gate.record()" in src,
 check("check_gate.penalize(w)" in src,
       "G6: فلود چک گیت را جریمه می‌کند (سقف سراسری)")
 check("ex_check_flood" in src, "G6: فلود چک لاگ اختصاصی دارد")
+check('eng.thr["standard"].penalize' not in src[src.find("async def peer_in_my_channel"):src.find("async def confirm_peer_membership")],
+      "G6: فلود چک تروتیل ارسال را لمس نمی‌کند")
+check(src.count("if check_gate.blocked():") >= 2,
+      "G6: هر دو حلقه هنگام سقف فلود شمارنده نمی‌سوزانند (۶۰ث صبر)")
 print("DONE G6 wiring")
 
 

@@ -93,6 +93,7 @@ harness_src = (
     "    membership_check_delay = stub.check_delay\n"
     "    note = stub.note\n"
     "    warn_membership_check_broken = stub.warn\n"
+    "    check_gate = stub.gate\n"
     + "\n".join("    " + ln for ln in ded.splitlines())
     + "\n"
 )
@@ -102,7 +103,7 @@ run_reminder = hns["_run"]
 
 
 class Stub:
-    def __init__(self, member_map=None, send_ok=True):
+    def __init__(self, member_map=None, send_ok=True, gate=None):
         self.member_map = member_map or {}
         self.send_ok = send_ok
         self.sent = []
@@ -110,6 +111,7 @@ class Stub:
         self.notes = []
         self.warns = []
         self.fast = []
+        self.gate = gate or m.CheckGate(base_gap=0.0)
 
     async def confirm(self, pid, fast=False):
         self.fast.append(bool(fast))
@@ -233,6 +235,7 @@ pharness = (
     "    reminder_delay = stub.reminder_delay\n"
     "    membership_check_delay = stub.check_delay\n"
     "    note = stub.note\n"
+    "    check_gate = stub.gate\n"
     + "\n".join("    " + ln for ln in ded.splitlines())
     + "\n"
 )
@@ -339,6 +342,38 @@ gr = eng.db.ex_by_peer(605)
 gate_ok = bool(gr and gr.get("status") in ("pending", "approved", "joined"))
 check(gate_ok is False, "F6: تبادل بسته‌شده (left) → نادیده")
 print("DONE F6 gate relaxation")
+
+
+# ════════════════════════════════════════════════════════════
+# F7 — سقف فلود فعال → حلقه‌ها شمارنده نمی‌سوزانند و ۶۰ث صبر می‌کنند
+# ════════════════════════════════════════════════════════════
+eng = fresh_engine()
+blocked_gate = m.CheckGate(base_gap=0.0)
+blocked_gate.penalize(120, now=int(time.time()))          # سقف ۱۲۰ث فعال
+stub = Stub(member_map={701: None}, gate=blocked_gate)    # چک نامشخص می‌دهد
+r = mkRec(eng, 701, "@fix701", "pending")
+
+asyncio.run(run_reminder(eng, eng.ex_cfg(), stub))
+g = eng.db.ex_get(r["id"])
+check(g["strikes"] == 0, "F7: داخل سقف فلود → شمارنده «نامشخص» نمی‌سوزد")
+check(0 < g["next_reminder"] - int(time.time()) <= 65,
+      "F7: داخل سقف فلود → ۶۰ ثانیه دیگر دوباره (نه چرخه کوتاه بی‌پایان)")
+check(len(stub.warns) == 0, "F7: داخل سقف فلود → هشدار بی‌مورد نمی‌رود")
+
+# و چک دوره‌ای هم همان‌طور
+eng2 = fresh_engine()
+stub2 = Stub(member_map={702: None}, gate=blocked_gate)
+r2 = mkRec(eng2, 702, "@fix702", "joined", due_rem=False, due_check=True)
+x2 = eng2.ex_cfg()
+x2["enabled"] = True
+asyncio.run(run_periodic(eng2, x2, stub2))
+g2 = eng2.db.ex_get(r2["id"])
+check(g2["strikes"] == 0, "F7: چک دوره‌ای داخل سقف فلود → شمارنده نمی‌سوزد")
+check(0 < g2["next_check"] - int(time.time()) <= 65,
+      "F7: چک دوره‌ای داخل سقف فلود → ۶۰ ثانیه صبر")
+check(r2["link"] not in stub2.left,
+      "F7: داخل سقف فلود لفت نصفه‌کاره نمی‌شود — بعد از باز شدن گیت انجام می‌شود")
+print("DONE F7 flood-cooldown patience")
 
 
 if FAILS:

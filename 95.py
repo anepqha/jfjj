@@ -4852,7 +4852,9 @@ async def connect_and_run(eng, creds):
             except FloodWaitError as e:
                 w = getattr(e, "seconds", 60)
                 check_gate.penalize(w)
-                eng.thr["standard"].penalize(w)
+                # فیکس: فلودِ «بررسی عضویت» ربطی به ظرفیت ارسال ندارد؛
+                # قبلاً تروتیل ارسال هم جریمه می‌شد و کل ربات فریز می‌شد
+                # (نه پیام می‌رفت نه لفت انجام می‌شد). فقط گیت چک می‌ایستد.
                 eng.db.log("warn", "ex_check_flood", f"{ch}: {w}s")
                 # فلودِ چک یعنی کل مسیر بررسی دارد قیچی می‌شود — به
                 # صاحب‌حساب بگو (حداکثر هر ۱۰ دقیقه یک‌بار).
@@ -5720,10 +5722,18 @@ async def connect_and_run(eng, creds):
                                            f"📡 کانال: `{rec.get('link') or '—'}`\n"
                                            f"👤 طرف: {rec.get('peer_name') or rec.get('peer_id')}")
                     else:
-                        # نامشخص (FloodWait/خطای API). فیکس: قبلاً همین‌جا
-                        # تا ابد با فاصله کوتاه دوباره چک می‌شد — بی‌صدا و
-                        # بی‌اثر. حالا بعد از ۵ بار پشت‌سرهم فاصله بلند
-                        # می‌شود و یک‌بار به صاحب‌حساب هشدار داده می‌شود.
+                        # نامشخص (FloodWait/خطای API).
+                        if check_gate.blocked():
+                            # سقف فلود فعال است — شمارنده نسوزان؛ فقط ۶۰
+                            # ثانیه دیگر دوباره. قبلاً همین‌جا رکوردها در
+                            # حالت «نامشخص» می‌چرخیدند و لفت عقب می‌افتد.
+                            eng.db.ex_set(rec["id"],
+                                          next_reminder=int(now2 + 60),
+                                          note="فلود بررسی — ۶۰ ثانیه صبر")
+                            continue
+                        # قبلاً همین‌جا تا ابد با فاصله کوتاه دوباره چک
+                        # می‌شد — بی‌صدا و بی‌اثر. حالا بعد از ۵ بار
+                        # پشت‌سرهم فاصله بلند می‌شود و هشدار می‌رود.
                         unk = int(rec.get("strikes") or 0) + 1
                         if unk >= 5:
                             eng.db.ex_set(rec["id"], strikes=unk,
@@ -5824,8 +5834,14 @@ async def connect_and_run(eng, creds):
                             eng.log("info", "ex_strike",
                                     f"#{rec['id']} {st}/{x['max_strikes']}")
                     else:
-                        # نامشخص در چک دائمی — بعد از ۵ بار، فاصله را بلند
-                        # کن و یک‌بار هشدار بده؛ قبلاً بی‌صدا تا ابد می‌چرخید.
+                        # نامشخص در چک دائمی.
+                        if check_gate.blocked():
+                            eng.db.ex_set(rec["id"], last_check=now,
+                                          next_check=now + 60,
+                                          note="فلود بررسی — ۶۰ ثانیه صبر")
+                            continue
+                        # بعد از ۵ بار نامشخصِ واقعی (نه فلود)، فاصله بلند
+                        # کن و یک‌بار هشدار بده.
                         unk = int(rec.get("strikes") or 0) + 1
                         if unk >= 5:
                             eng.db.ex_set(rec["id"], last_check=now,
