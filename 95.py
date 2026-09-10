@@ -4373,6 +4373,27 @@ async def connect_and_run(eng, creds):
         except Exception:
             pass
 
+    _warn_check = {"last": 0}
+
+    async def warn_membership_check_broken(now):
+        """هشدارِ یک‌بار در ۱۰ دقیقه: چک عضویت مدتی است بی‌نتیجه است.
+        قبلاً این حالت کاملاً بی‌صدا بود؛ نتیجه‌اش این بود که نه «نیومدی»
+        می‌رفت نه لفت انجام می‌شد و صاحب‌حساب هم نمی‌فهمد چرا."""
+        if int(now) - int(_warn_check["last"] or 0) < 600:
+            return
+        _warn_check["last"] = int(now)
+        has_ch = any((eng.st.prof(t)["channel"] or "").strip()
+                     for t in ("standard", "vip"))
+        if has_ch:
+            await note("🕵️ بررسی عضویت مدتی است **نامشخص** می‌ماند "
+                       "(FloodWait یا محدودیت API). خودم دوباره امتحان "
+                       "می‌کنم؛ اگر ادامه داشت اکانت را کمی استراحت بده.")
+        else:
+            await note("⚠️ **کانال من تنظیم نشده است** — تا وقتی با "
+                       "`کانال @username` ستش نکنی، هیچ عضویتی تأیید "
+                       "نمی‌شود: نه «نیومدی» می‌رود نه لفت خودکار انجام "
+                       "می‌شود.")
+
     # ---------- هوش مصنوعی ----------
     async def handle_ai(event, arg, reply_text=None):
         a = eng.ai
@@ -5087,10 +5108,17 @@ async def connect_and_run(eng, creds):
             # (replied_to_me) یا ربات را mention کرده باشد (event.mentioned).
             # این کار جلوی «پنل باز نمی‌شود» و پاسخ‌های تصادفی به
             # پیام‌های «جوین شدم» مردم به همدیگر را می‌گیرد.
-            # لینک‌های عمومی گروه‌های ثبت‌شده از مسیر scan_groups (پیش‌قدم)
-            # پردازش می‌شوند و اینجا تغییری نمی‌کنند.
+            # فیکس: خیلی از طرف‌ها به پیام ریپلای نمی‌زنند و «جوین شدم» را
+            # جدا تایپ می‌کنند؛ اگر همین فرستنده یک تبادلِ فعال با ما داشته
+            # باشد و متنش ادعای جوین باشد، پردازشش می‌کنیم — قبلاً همین باعث
+            # می‌شد ادعایش هیچ چک نشود (نه «نیومدی» می‌رفت نه لفت).
             if not replied_to_me and not getattr(event, "mentioned", False):
-                return
+                gate_rec = eng.db.ex_by_peer(getattr(sender, "id", 0) or 0)
+                gate_ok = (local_claim and gate_rec
+                           and gate_rec.get("status") in ("pending", "approved",
+                                                          "joined"))
+                if not gate_ok:
+                    return
 
         # ریپلای خالی/نامرتبط به پیام جفج را هم پردازش نکن؛ فقط ادعای Join
         # یا لینک واقعی کانال، درخواست تبادل محسوب می‌شود.
@@ -5232,8 +5260,7 @@ async def connect_and_run(eng, creds):
         # ── نامشخص ──
         if member is None:
             eng.log("warn", "ex_unknown", f"{sender_name} — عضویت قابل بررسی نبود")
-            # حتی وقتی عضویت نامشخص است، جوینِ طرف را متوقف نکن (رفع باگ)؛
-            # اما مثل مسیر «عضو نیست» فقط لینکِ خودِ پیام یا رکوردِ ثبت‌شده‌ی
+            # مثل مسیر «عضو نیست» فقط لینکِ خودِ پیام یا رکوردِ ثبت‌شده‌ی
             # قبلی مبناست — نه کانال شخصی پروفایل هر ریپلای‌کننده‌ای.
             link, _src = await find_their_channel(event, sender, event.chat_id,
                                                   deep=False)
@@ -5242,22 +5269,43 @@ async def connect_and_run(eng, creds):
                 rec0, _n = eng.db.ex_add(sender.id, sender_name, link)
             if not rec0:
                 rec0 = eng.db.ex_by_peer(sender.id)
+            # فیکس: «نامشخص» دیگر به معنی تأییدِ بدون چک نیست. قبلاً همین‌جا
+            # طرف بدون هیچ بررسی‌ای approved می‌شد و کانالش بعداً جوین می‌شد —
+            # یعنی ادعای «جوین شدم» اصلاً چک نمی‌شد.
+            has_channel = any((eng.st.prof(t)["channel"] or "").strip()
+                              for t in ("standard", "vip"))
             if rec0 and rec0["status"] not in ("joined", "rejected",
                                                "left", "failed"):
-                eng.db.ex_set(rec0["id"], status="approved", direction="in",
-                              peer_id=sender.id, peer_name=sender_name,
-                              src_chat=event.chat_id, src_msg=event.id,
-                              replied=0, strikes=0)
-                eng.log("info", "ex_reciprocal",
-                        f"{sender_name} → {link or rec0.get('link')}"
-                        " (عضویت نامشخص − در صف)")
+                if has_channel:
+                    # چک موقتاً نامشخص شده (FloodWait/خطای API) — یک بررسی
+                    # بی‌صدای دوباره زمان‌بندی کن؛ حلقه‌ی یادآوری اگر واقعاً
+                    # عضو شد تأیید می‌کند، اگر نه «نیومدی» می‌رود.
+                    eng.db.ex_set(rec0["id"], direction="in",
+                                  peer_id=sender.id, peer_name=sender_name,
+                                  src_chat=event.chat_id, src_msg=event.id,
+                                  replied=0, strikes=0,
+                                  next_reminder=int(time.time())
+                                  + membership_check_delay(),
+                                  note="عضویت نامشخص — دوباره چک می‌کنم")
+                    eng.log("info", "ex_unknown_recheck",
+                            f"{sender_name} → {link or rec0.get('link')}")
+                else:
+                    # کانال من اصلاً تنظیم نشده؛ عضویت هرگز قابل تأیید نیست.
+                    # در وضعیت pending می‌ماند تا کانال ست شود — نه تأییدِ
+                    # کورکورانه، نه جوینِ کانال طرف.
+                    eng.db.ex_set(rec0["id"], status="pending", direction="in",
+                                  peer_id=sender.id, peer_name=sender_name,
+                                  src_chat=event.chat_id, src_msg=event.id,
+                                  replied=0, strikes=0,
+                                  note="کانال من تنظیم نشده — عضویت تأیید نشد")
+                    eng.log("warn", "ex_no_channel",
+                            f"{sender_name} → {link or rec0.get('link')}")
             # پیام «جوین شدم» فقط بعد از Join واقعی می‌رود (reply_joined)؛
             # همین‌جا و زودتر از موعد گفته نمی‌شود تا پشت سر پیام دیگری
             # نیفتد. اگر متنی برای انتظار ثبت شده باشد، همان می‌رود.
             await say("msg_wait")
-            if not eng.st.prof("standard")["channel"]:
-                await note(f"⚠️ کانال تعیین نشده — نمی‌توانم عضویت را چک کنم.\n"
-                           "`کانال عادی @channel`")
+            if not has_channel:
+                await warn_membership_check_broken(int(time.time()))
             return
 
         # ── عضو هست → کانالش را پیدا کن ──
@@ -5522,10 +5570,28 @@ async def connect_and_run(eng, creds):
                             sent = await send_not_joined_reminder(rec)
                             if sent:
                                 count += 1
-                            eng.db.ex_set(rec["id"], reminders=count,
-                                          next_reminder=int(now2 + reminder_delay()),
-                                          note="یادآوری ارسال شد" if sent
-                                          else "یادآوری ارسال نشد — دوباره زمان‌بندی شد")
+                                eng.db.ex_set(rec["id"], reminders=count,
+                                              strikes=0,
+                                              next_reminder=int(now2 + reminder_delay()),
+                                              note="یادآوری ارسال شد")
+                            else:
+                                # فیکس: اگر ارسال پیام ممکن نشد (ریپلای
+                                # خاموش، پیام مرجع پیدا نشد، خطای ارسال)،
+                                # قبلاً همین‌جا تا ابد دوباره زمان‌بندی
+                                # می‌شد و لفت هیچ‌وقت نمی‌رسید. حالا بعد
+                                # از ۳ تلاشِ ناموفق، سراغ لفت/لغو می‌رویم.
+                                fails = int(rec.get("strikes") or 0) + 1
+                                if fails >= 3:
+                                    eng.db.ex_set(rec["id"], reminders=max_rem,
+                                                  strikes=fails,
+                                                  next_reminder=int(now2 + 5),
+                                                  note="ارسال یادآوری نشد — رفتن به مرحله لفت")
+                                    eng.log("warn", "ex_remind_fail",
+                                            f"#{rec['id']} {rec['link']} — ۳ تلاش ناموفق")
+                                else:
+                                    eng.db.ex_set(rec["id"], strikes=fails,
+                                                  next_reminder=int(now2 + reminder_delay()),
+                                                  note=f"یادآوری ارسال نشد — تلاش {fa(fails)} از ۳")
                         elif max_rem == 0:
                             # «بدون پیام»: فقط بی‌صدای عضویت را چک می‌کنیم.
                             eng.db.ex_set(rec["id"],
@@ -5556,9 +5622,20 @@ async def connect_and_run(eng, creds):
                                            f"📡 کانال: `{rec.get('link') or '—'}`\n"
                                            f"👤 طرف: {rec.get('peer_name') or rec.get('peer_id')}")
                     else:
-                        eng.db.ex_set(rec["id"],
-                                      next_reminder=int(now2 + membership_check_delay()),
-                                      note="بررسی عضویت نامشخص است")
+                        # نامشخص (FloodWait/خطای API). فیکس: قبلاً همین‌جا
+                        # تا ابد با فاصله کوتاه دوباره چک می‌شد — بی‌صدا و
+                        # بی‌اثر. حالا بعد از ۵ بار پشت‌سرهم فاصله بلند
+                        # می‌شود و یک‌بار به صاحب‌حساب هشدار داده می‌شود.
+                        unk = int(rec.get("strikes") or 0) + 1
+                        if unk >= 5:
+                            eng.db.ex_set(rec["id"], strikes=unk,
+                                          next_reminder=int(now2 + 600),
+                                          note="بررسی عضویت مدتی است نامشخص — ۱۰ دقیقه صبر")
+                            await warn_membership_check_broken(now2)
+                        else:
+                            eng.db.ex_set(rec["id"], strikes=unk,
+                                          next_reminder=int(now2 + membership_check_delay()),
+                                          note="بررسی عضویت نامشخص است")
 
                 # ۳) چک دوره‌ای دائمی: طرف هنوز عضو کانال من هست؟
                 # فیکس باگ: قبلاً چک دائمی نبود و طرف بعد ۱۵ ثانیه لفت می‌داد.
@@ -5594,6 +5671,28 @@ async def connect_and_run(eng, creds):
                                       strikes=0, note="عضو است")
                     elif still is False:
                         st = rec["strikes"] + 1
+                        # فیکس: طرفی که از اول هیچ‌وقت نیامده (بدون ادعای
+                        # «جوین شدم» و بدون پیام موفق — replied=0) اول باید
+                        # «نیومدی» بشنود؛ لفتِ بی‌هشدار منصفانه نیست. دور
+                        # یادآوری شروع می‌شود و حلقه‌ی یادآوری بعد از پیام‌ها
+                        # لفت می‌دهد. لفتِ فوری فقط برای تقلب‌کننده‌هاست:
+                        # عضو شد، پیام موفق گرفت، بعد لفت داد (replied=1).
+                        if (x["reply"] and rec.get("peer_id")
+                                and not int(rec.get("replied") or 0)
+                                and st <= 1
+                                and max(0, int(x.get("max_reminders", 2) or 0)) >= 1):
+                            sent0 = await send_not_joined_reminder(rec)
+                            nowf = int(time.time())
+                            eng.db.ex_set(rec["id"],
+                                          strikes=1, last_check=nowf,
+                                          next_check=0,
+                                          reminders=1 if sent0 else 0,
+                                          next_reminder=nowf + reminder_delay(),
+                                          note="نیومد — دور «نیومدی» شروع شد (چک دائمی)")
+                            eng.log("info", "ex_first_miss",
+                                    f"#{rec['id']} {rec['link']}")
+                            await asyncio.sleep(2)
+                            continue
                         if st >= x["max_strikes"]:
                             ok, err = await leave_link(rec["link"])
                             eng.db.ex_set(rec["id"],
@@ -5627,8 +5726,18 @@ async def connect_and_run(eng, creds):
                             eng.log("info", "ex_strike",
                                     f"#{rec['id']} {st}/{x['max_strikes']}")
                     else:
-                        eng.db.ex_set(rec["id"], last_check=now,
-                                      next_check=now + membership_check_delay())
+                        # نامشخص در چک دائمی — بعد از ۵ بار، فاصله را بلند
+                        # کن و یک‌بار هشدار بده؛ قبلاً بی‌صدا تا ابد می‌چرخید.
+                        unk = int(rec.get("strikes") or 0) + 1
+                        if unk >= 5:
+                            eng.db.ex_set(rec["id"], last_check=now,
+                                          next_check=now + 600, strikes=unk,
+                                          note="بررسی عضویت مدتی است نامشخص — ۱۰ دقیقه صبر")
+                            await warn_membership_check_broken(now)
+                        else:
+                            eng.db.ex_set(rec["id"], last_check=now,
+                                          next_check=now + membership_check_delay(),
+                                          strikes=unk)
                     await asyncio.sleep(2)
 
                 # برای دقت فاصله‌ی یادآوری، بیشتر از دو ثانیه در صف نمان.

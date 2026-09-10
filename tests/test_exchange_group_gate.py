@@ -6,18 +6,29 @@ to be in the watch list (or even outside it when the message mentioned
 a channel link). That turned into spam — the bot would reply "not
 joined" to messages between two strangers.
 
-The gate now requires the incoming group message to be either a *reply
+The gate requires the incoming group message to be either a *reply
 to a message of this self-account* (``replied_to_me``) or a *mention*
 of this account (``event.mentioned``). PV behaviour is unchanged.
 
-This test extracts the gate block from the *real* 95.py source and
-re-runs it against fake events in a subprocess. Five scenarios:
+Fix (claim-flow): peers often type «جوین شدم» as a fresh message
+instead of replying to the bot's message. If that sender has an ACTIVE
+exchange record (pending/approved/joined) and the text is a real join
+claim, the gate lets it through — previously such claims were silently
+ignored, so no «نیومدی» went out and no leave ever happened.
+Strangers (no active record) and closed exchanges (left/failed) stay
+blocked exactly like before.
 
-  s1: group + "جوین شدم" + no reply, no mention            → blocked
-  s2: group + "جوین شدم" replying to one of OUR messages    → pass
-  s3: group + "جوین شدم" mentioning our username            → pass
-  s4: PV (private) "جوین شدم"                                → pass
-  s5: group + public channel link, no reply/mention         → blocked
+This test extracts the gate block from the *real* 95.py source and
+re-runs it against fake events in a subprocess. Scenarios:
+
+  s1: group + no reply, no mention, not a claim               → blocked
+  s2: group + claim replying to one of OUR messages           → pass
+  s3: group + claim mentioning our username                   → pass
+  s4: PV (private) claim                                      → pass
+  s5: group + public channel link, no reply/mention           → blocked
+  s6: group + fresh «جوین شدم» + ACTIVE exchange record       → pass
+  s7: group + fresh «جوین شدم» + no record at all             → blocked
+  s8: group + fresh «جوین شدم» + closed record (left)         → blocked
 """
 import os
 import shutil
@@ -36,7 +47,7 @@ SRC_REPO = REPO
 # The driver runs as `python -c <DRIVER>` in the APP directory. It
 # 1) imports 95.py
 # 2) extracts the gate block (a small if/else) by string-locating it
-# 3) compiles the gate as a top-level Python function, then runs five
+# 3) compiles the gate as a top-level Python function, then runs the
 #    scenarios and prints one OUT line per scenario
 DRIVER = r"""
 import os, sys, re, importlib.util
@@ -51,7 +62,7 @@ i = src.find("# کجاها گوش بده")
 if i < 0:
     print("GATE_NOT_FOUND")
     sys.exit(1)
-end_marker = 'if not replied_to_me and not getattr(event, "mentioned", False):\n                return'
+end_marker = "if not gate_ok:\n                    return"
 j = src.find(end_marker, i)
 if j < 0:
     print("GATE_END_NOT_FOUND")
@@ -76,7 +87,8 @@ gate_lines = [ln[8:] if ln.startswith("        ") else ln for ln in gate_lines]
 gate_lines = [ln.replace("return", "return True") if ln.strip() == "return"
               else ln for ln in gate_lines]
 body = "\n".join("    " + ln for ln in gate_lines)
-func_src = "def gate(event, replied_to_me):\n" + body + "\n    return False\n"
+func_src = ("def gate(event, replied_to_me, local_claim=False, sender=None,"
+            " eng=None):\n" + body + "\n    return False\n")
 scope = {}
 exec(func_src, scope)
 gate_fn = scope["gate"]
@@ -88,19 +100,53 @@ class E:
             setattr(self, k, v)
 
 
+class FakeDB:
+    def __init__(self, rec):
+        self.rec = rec
+
+    def ex_by_peer(self, pid):
+        return self.rec
+
+
+class FakeEng:
+    def __init__(self, rec):
+        self.db = FakeDB(rec)
+
+
+def S(pid):
+    return E(id=pid)
+
+
+ACTIVE = {"status": "joined"}
+CLOSED = {"status": "left"}
+
 scenarios = [
-    ("s1", dict(is_private=False, mentioned=False, replied_to_me=False),  True),
-    ("s2", dict(is_private=False, mentioned=False, replied_to_me=True),   False),
-    ("s3", dict(is_private=False, mentioned=True,  replied_to_me=False),  False),
-    ("s4", dict(is_private=True,  mentioned=False, replied_to_me=False),  False),
-    ("s5", dict(is_private=False, mentioned=False, replied_to_me=False),  True),
+    ("s1", dict(is_private=False, mentioned=False, replied_to_me=False),
+     dict(claim=False, rec=None), True),
+    ("s2", dict(is_private=False, mentioned=False, replied_to_me=True),
+     dict(claim=False, rec=None), False),
+    ("s3", dict(is_private=False, mentioned=True,  replied_to_me=False),
+     dict(claim=False, rec=None), False),
+    ("s4", dict(is_private=True,  mentioned=False, replied_to_me=False),
+     dict(claim=False, rec=None), False),
+    ("s5", dict(is_private=False, mentioned=False, replied_to_me=False),
+     dict(claim=False, rec=None), True),
+    ("s6", dict(is_private=False, mentioned=False, replied_to_me=False),
+     dict(claim=True, rec=ACTIVE), False),
+    ("s7", dict(is_private=False, mentioned=False, replied_to_me=False),
+     dict(claim=True, rec=None), True),
+    ("s8", dict(is_private=False, mentioned=False, replied_to_me=False),
+     dict(claim=True, rec=CLOSED), True),
 ]
 
 all_ok = True
-for name, kw, expect_blocked in scenarios:
+for name, kw, extra, expect_blocked in scenarios:
     ev = E(**kw)
+    eng = FakeEng(extra["rec"]) if extra["rec"] is not None else FakeEng(None)
     try:
-        blocked = bool(gate_fn(ev, kw["replied_to_me"]))
+        blocked = bool(gate_fn(ev, kw["replied_to_me"],
+                               local_claim=extra["claim"],
+                               sender=S(999), eng=eng))
     except Exception as e:
         print(f"OUT {name} = ERROR {type(e).__name__}: {e}")
         all_ok = False
@@ -136,7 +182,7 @@ def run():
 
 
 def main():
-    print("--- exchange_group_gate: 5 scenarios ---")
+    print("--- exchange_group_gate: 8 scenarios ---")
     reset()
     out, err, rc = run()
     if err.strip():
