@@ -19,13 +19,13 @@ The new behaviour this test pins down (round2 fix):
     - if custom msg_no is set: ONLY the custom text, no channel appended
     - if custom NOT set: default «نیومدی» + MY registered channel (@dar_sokoote_seda),
       NOT the peer's channel (@SWAG_815);
-  * the SECOND «نیومدی» comes after a random gap — default 10–20 s (same as permanent check) —
+  * the SECOND «نیومدی» comes after a random gap — default 20–40 s —
     never back to back, and never a third one;
   * after both reminders, if the peer still has not joined, the bot
     LEAVES the peer's channel (or cancels the exchange if it had not
     joined it yet);
   * if the msg_no text was never configured, the default is «نیومدی»;
-  * defaults: max_reminders=2, reminder gap 10–20 s random (synced with check).
+  * defaults: max_reminders=2, reminder gap 20–40 s random.
 
 The reminder-loop block is extracted from the real 95.py source and
 re-run against a real Engine + real DB with stubbed Telegram calls,
@@ -55,15 +55,15 @@ spec.loader.exec_module(m)
 
 src = open("95.py", encoding="utf-8").read()
 
-# ── 1. Defaults: two reminders, 10–20 s random gap (synced with permanent check) ─────────────────
+# ── 1. Defaults: two reminders, 20–40 s random gap ───────────────────────────
 eng = m.Engine()
 x = eng.ex_cfg()
 print("DEF max_reminders", x["max_reminders"])
 print("DEF reminder_min", x["reminder_min_sec"])
 print("DEF reminder_max", x["reminder_max_sec"])
 assert x["max_reminders"] == 2, x["max_reminders"]
-assert x["reminder_min_sec"] == 10, x["reminder_min_sec"]
-assert x["reminder_max_sec"] == 20, x["reminder_max_sec"]
+assert x["reminder_min_sec"] == 20, x["reminder_min_sec"]
+assert x["reminder_max_sec"] == 40, x["reminder_max_sec"]
 print("OK defaults")
 
 # ── 2. msg_no default text: «نیومدی» + my channel when not configured ──
@@ -90,20 +90,20 @@ assert eng.ex_render("msg_ok") == ""
 x["msg_no"] = ""
 print("OK msg_no default render")
 
-# ── 3. reminder_delay formula in 95.py samples inside 10–20 (synced) ────────
+# ── 3. reminder_delay formula in 95.py samples inside 20–40 (default) ───────
 # (the inner function is replicated with the same fallbacks; a source
 #  check below additionally pins the fallback values themselves)
 def reminder_delay():
-    lo = max(1, int(x.get("reminder_min_sec", 10) or 10))
-    hi = max(lo, int(x.get("reminder_max_sec", 20) or 20))
+    lo = max(1, int(x.get("reminder_min_sec", 20) or 20))
+    hi = max(lo, int(x.get("reminder_max_sec", 40) or 40))
     return random.randint(lo, hi)
 samples = [reminder_delay() for _ in range(300)]
 print("SAMPLE reminder min", min(samples), "max", max(samples))
-assert all(10 <= v <= 20 for v in samples), "reminder gap out of 10-20"
+assert all(20 <= v <= 40 for v in samples), "reminder gap out of 20-40"
 assert min(samples) < max(samples), "reminder gap not random"
 assert 'reminder_min_sec' in src
 assert 'reminder_max_sec' in src
-print("OK reminder delay 10-20 random (synced)")
+print("OK reminder delay 20-40 random")
 
 # ── 4. Migration of old settings to the new defaults ───────────────
 old_cfg = {"exchange": {
@@ -120,7 +120,7 @@ ox = st.data["exchange"]
 print("MIG max_reminders", ox["max_reminders"], "gap",
       ox["reminder_min_sec"], "-", ox["reminder_max_sec"], "msg_no", repr(ox["msg_no"]))
 assert ox["max_reminders"] == 2, ox["max_reminders"]
-assert ox["reminder_min_sec"] == 10 and ox["reminder_max_sec"] == 20
+assert ox["reminder_min_sec"] == 20 and ox["reminder_max_sec"] == 40
 # the legacy literal default is wiped and falls back to «نیومدی»
 assert ox["msg_no"] == ""
 mig_eng = m.Engine()
@@ -402,12 +402,18 @@ harness_src = (
     "    reminder_delay = stub.reminder_delay\n"
     "    membership_check_delay = stub.check_delay\n"
     "    note = stub.note\n"
+    "    check_gate = stub.gate\n"
+    "    warn_membership_check_broken = stub.warn_broken\n"
     + "\n".join("    " + ln for ln in ded.splitlines())
     + "\n"
 )
 hns = {}
 exec(harness_src, hns)
 run_once = hns["_run"]
+
+class GateStub:
+    def blocked(self, now=None):
+        return False
 
 class Stub:
     def __init__(self, member_map):
@@ -416,6 +422,10 @@ class Stub:
         self.left = []
         self.notes = []
         self.fast = []
+        self.gate = GateStub()
+        self.warned = []
+    async def warn_broken(self, now):
+        self.warned.append(now)
     async def confirm(self, pid, fast=False):
         # نوبت‌های یادآوری باید با fast=True صدا زده شوند تا فاصله‌ی
         # چک عضویت روی بازه‌ی تنظیم‌شده‌ی کاربر اضافه نشود.
@@ -499,6 +509,22 @@ assert stub2.sent == [] and stub2.left == []
 assert g5["status"] == "pending"
 assert g5["next_reminder"] > now, "silent monitoring stopped"
 print("OK S5 zero-reminders stays silent")
+
+# S6 — نتیجه‌ی «نامشخص» (فلود/خطای API) هرگز نباید شمارنده‌ی اخطارِ لفت
+# (strikes) را آلوده کند؛ شمارنده‌ی جدای خودش (unk_streak) را دارد.
+# قبلاً هر فلود یک اخطارِ لفت حساب می‌شد و لفتِ اشتباه می‌ساخت.
+r6 = mkRec(506, "@c506", "pending", 1)
+eng.db.ex_set(r6["id"], strikes=1)           # یک اخطارِ واقعیِ قبلی دارد
+stub3 = Stub({})                               # 506 در نقشه نیست → هیچ‌کدام
+asyncio.run(run_once(eng, x2, stub3))
+g6 = eng.db.ex_get(r6["id"])
+print("S6 strikes", g6["strikes"], "unk", g6["unk_streak"],
+      "sent", stub3.sent, "next>0", g6["next_reminder"] > now)
+assert g6["strikes"] == 1, "unknown result polluted the leave-strike counter"
+assert g6["unk_streak"] == 1, "unknown result did not bump its own counter"
+assert r6["id"] not in stub3.sent, "unknown membership sent a reminder"
+assert g6["next_reminder"] > now, "unknown membership was not rescheduled"
+print("OK S6 unknown keeps strikes clean (separate unk_streak)")
 
 print("DONE PASS")
 """

@@ -141,6 +141,11 @@ class Stub:
     def check_delay():
         return 15
 
+    @staticmethod
+    def watch_delay(rec):
+        # فاصله‌ی پلکانی چک نگهبانی در تست‌ها همان بازه‌ی پایه است.
+        return 15
+
 
 def mkRec(eng, peer, link, status, reminders=0, direction="in",
           replied=0, strikes=0, due_rem=True, due_check=False):
@@ -196,12 +201,14 @@ for i in range(4):
     eng.db.ex_set(r["id"], next_reminder=int(time.time()) - 5)
     asyncio.run(run_reminder(eng, eng.ex_cfg(), stub))
 g = eng.db.ex_get(r["id"])
-check(g["strikes"] == 4 and g["status"] == "pending",
-      "F2: ۴ بار نامشخص → هنوز فاصله کوتاه")
+check(g["unk_streak"] == 4 and g["status"] == "pending",
+      "F2: ۴ بار نامشخص → هنوز فاصله کوتاه (شمارنده‌ی جدا)")
+check(g["strikes"] == 0,
+      "F2: نتیجه‌ی نامشخص اخطارِ لفت (strikes) را آلوده نمی‌کند")
 eng.db.ex_set(r["id"], next_reminder=int(time.time()) - 5)
 asyncio.run(run_reminder(eng, eng.ex_cfg(), stub))
 g = eng.db.ex_get(r["id"])
-check(g["strikes"] >= 5, "F2: بار پنجم → شمارنده گذشت")
+check(g["unk_streak"] >= 5, "F2: بار پنجم → شمارنده‌ی نامشخص گذشت")
 check(g["next_reminder"] - int(time.time()) > 300,
       "F2: بعد از ۵ بار نامشخص → فاصله بلند (۱۰ دقیقه)")
 check(len(stub.warns) == 1, "F2: هشدار مالک دقیقاً یک‌بار رفت")
@@ -234,6 +241,8 @@ pharness = (
     "    leave_link = stub.leave\n"
     "    reminder_delay = stub.reminder_delay\n"
     "    membership_check_delay = stub.check_delay\n"
+    "    watch_delay_seconds = stub.watch_delay\n"
+    "    warn_membership_check_broken = stub.warn\n"
     "    note = stub.note\n"
     "    check_gate = stub.gate\n"
     + "\n".join("    " + ln for ln in ded.splitlines())
@@ -273,22 +282,30 @@ print("DONE F3 first-miss reminder cycle")
 
 
 # ════════════════════════════════════════════════════════════
-# F4 — تقلب‌کننده (عضو شد، پیام گرفت replied=1، لفت داد) → لفت فوری
+# F4 — تقلب‌کننده (عضو شد، پیام گرفت replied=1، لفت داد) → لفت بعد از ۲ نبودنِ تأییدشده
 # ════════════════════════════════════════════════════════════
 eng = fresh_engine()
 stub = Stub(member_map={604: False}, send_ok=True)
 x = eng.ex_cfg()
 x["enabled"] = True
+x["max_strikes"] = 2
 r = mkRec(eng, 604, "@fix604", "joined", direction="out", replied=1,
           due_rem=False, due_check=True)
 
+# نبودنِ اول: هنوز لفت نمی‌دهیم (محافظت در برابر منفیِ کاذب)؛ فقط اخطار.
+asyncio.run(run_periodic(eng, x, stub))
+g = eng.db.ex_get(r["id"])
+check(r["link"] not in stub.left and g["status"] == "joined" and g["strikes"] == 1,
+      "F4: تقلب‌کننده (replied=1) → نبودنِ اول فقط اخطار است، لفت نه")
+# نبودنِ دوم (تأییدشده) → حالا لفت می‌دهیم.
+eng.db.ex_set(r["id"], next_check=int(time.time()) - 5)
 asyncio.run(run_periodic(eng, x, stub))
 g = eng.db.ex_get(r["id"])
 check(r["link"] in stub.left and g["status"] == "left",
-      "F4: تقلب‌کننده (replied=1) → لفت فوری با همان یک بار")
+      "F4: تقلب‌کننده (replied=1) → بعد از ۲ نبودنِ تأییدشده لفت می‌دهیم")
 check(len(stub.sent) == 1,
-      "F4: «نیومدی» تقلب‌کننده بعد از لفت می‌رود (لفت داد → لفت دادم)")
-print("DONE F4 cheater instant leave")
+      "F4: فقط یک «نیومدی» (در مرز)؛ بعد از لفت تکرار نمی‌شود")
+print("DONE F4 cheater leaves after 2 confirmed absences")
 
 
 # ════════════════════════════════════════════════════════════

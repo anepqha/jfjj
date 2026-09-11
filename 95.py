@@ -92,19 +92,20 @@ DEFAULTS = {
         "min_join_gap_sec": 30,    # فاصله پیش‌فرض بین دو جوین (از یک عدد ثابت به بازه تصادفی)
         "max_join_gap_sec": 60,
         # بررسی عضویت طرف بی‌صدا و با فاصله تصادفی انجام می‌شود.
-        # check_interval_sec فقط برای سازگاری با تنظیم‌های خیلی قدیمی است.
-        # فیکس دائمی: بعد از جوین، تا ابد هر ۱۰-۲۰ ثانیه چک می‌کنیم،
-        # اگر طرف لفت داد فوراً (بعد ۱ بار) از کانالش لفت می‌دهیم.
-        "check_min_sec": 10,
-        "check_max_sec": 20,
-        "check_interval_sec": 20,
+        # پیش‌فرض سالم: ۱۵ تا ۳۰ ثانیه تصادفی (نه آن‌قدر کوتاه که فلود بسازد).
+        # بعد از جوین، تا سقف ۲۴ ساعت چک می‌کنیم؛ فاصله‌ی چک با سن رکورد
+        # پلکانی بلند می‌شود تا بارِ «چک تا ابد» روی اکانت نیفتد.
+        # لفت فقط بعد از ۲ منفیِ تأییدشده (هرکدام با چک دوم) انجام می‌شود.
+        "check_min_sec": 15,
+        "check_max_sec": 30,
+        "check_interval_sec": 30,
         "response_delay_sec": 15,  # تأخیر پاسخ بعد از Join واقعی
         "max_joins_per_day": 0,    # Join بدون سقف روزانه
-        "recheck_hours": 0,        # ۰ = چک دائمی، هیچ‌وقت متوقف نشود (فیکس باگ ۱۵ثانیه‌ای)
+        "recheck_hours": 24,       # چک عضویت تا ۲۴ ساعت بعد از جوین ادامه دارد
         "recheck_minutes": 1,       # بررسی پیش‌فرض عضویت هر یک دقیقه (پشتیبان قدیمی)
-        "max_strikes": 1,          # فیکس جدی: بعد از ۱ بار نبودن فوراً لفت (قبلاً ۳ بار بود و طرف ۱۵ ثانیه‌ای لفت می‌داد و چک دائمی نداشت)
-        "permanent_check": True,   # چک دائمی: حتی بعد از ساعت‌ها/روزها همچنان چک کن
-        "permanent_check_max_hours": 0,  # ۰ = بدون محدودیت زمانی، تا ابد چک کن
+        "max_strikes": 2,          # لفت بعد از ۲ بار نبودنِ تأییدشده (نه یک منفیِ تنها)
+        "permanent_check": True,   # نگهبانی عضویت بعد از جوین
+        "permanent_check_max_hours": 24,  # سقف نگهبانی: ۲۴ ساعت بعد از جوین (۰ = تا ابد)
         # متن جواب‌ها را خودت تعیین می‌کنی:
         #   .ex msgok متن   → وقتی جوین شد
         #   .ex msgno متن   → وقتی طرف هنوز عضو نشده
@@ -129,8 +130,8 @@ DEFAULTS = {
         "response_max_sec": 48,      # (پیش‌فرض: ۱۱–۴۸ ثانیه)
         "reply_min_sec": 5,          # بازه‌ی تصادفی تأخیر پاسخ‌های مستقیم رویداد
         "reply_max_sec": 18,         # (عضو نیست/صبر کن/کانالت پیدا نشد؛ ۵–۱۸ ثانیه)
-        "reminder_min_sec": 10,      # فاصله کمینه بین دو پیام «نیومدی» (پیش‌فرض ۱۰–۲۰ ثانیه تصادفی — همگام با چک دائمی)
-        "reminder_max_sec": 20,      # فاصله بیشینه بین دو پیام «نیومدی» — هیچ‌وقت پشت سر هم نمی‌روند، همگام با چک دائمی
+        "reminder_min_sec": 20,      # فاصله کمینه بین دو پیام «نیومدی» (پیش‌فرض ۲۰–۴۰ ثانیه تصادفی)
+        "reminder_max_sec": 40,      # فاصله بیشینه بین دو پیام «نیومدی» — هیچ‌وقت پشت سر هم نمی‌روند
         # بعد از این تعداد پیام «عضو نیست»، اگر طرف هنوز نیامده باشد از
         # کانالش لفت می‌دهیم (یا اگر هنوز جوین نشده‌ایم، تبادل لغو می‌شود).
         "max_reminders": 2,
@@ -171,6 +172,7 @@ DEFAULTS = {
         "adaptive_uptime_threshold_hours": 3,   # بعد از چند ساعت کند شود
         "adaptive_uptime_extra_sec": 30,        # بعد از آستانه چقدر اضافه (۳۰→۶۰)
         "adaptive_uptime_per_hour_sec": 10,     # هر ساعت اضافه بعد آستانه چقدر بیشتر
+        "adaptive_uptime_max_sec": 90,          # سقفِ کلِّ اضافه از آپ‌تایم — بی‌نهایت رشد نمی‌کند
         "_adaptive_flood_extra": 0,             # اضافه فعلی از Flood
         "_adaptive_last_flood": 0,              # آخرین زمان Flood
         "_adaptive_last_decay": 0,              # آخرین چک کاهش
@@ -220,6 +222,8 @@ import re
 import sys
 import json
 import time
+import glob
+import shutil
 import random
 import sqlite3
 import asyncio
@@ -270,6 +274,30 @@ def secs(s):
 # ─────────────────────────────────────────────
 #  تنظیمات
 # ─────────────────────────────────────────────
+def backup_settings_file(path, keep=5):
+    """یک کپی زمان‌دار از فایل داده می‌سازد تا اگر مهاجرت یا هر اتفاق
+    غیرمنتظره چیزی را تغییر داد، نسخه‌ی قبل در دسترس بماند.
+    فقط `keep` بکاپ آخر نگه داشته می‌شود تا پوشه‌ی داده باد نکند."""
+    try:
+        if not os.path.exists(path):
+            return None
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        bak = f"{path}.bak-{ts}"
+        shutil.copy2(path, bak)
+        try:
+            backups = sorted(glob.glob(f"{path}.bak-*"))
+            for old in backups[:-keep]:
+                try:
+                    os.remove(old)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return bak
+    except Exception:
+        return None
+
+
 class Settings:
     def __init__(self, path=SETTINGS_FILE):
         self.path = path
@@ -323,44 +351,63 @@ class Settings:
                     self.data["exchange"]["scan_last_time"] = {}
                 if old_ex.get("recheck_minutes") in (None, 0):
                     self.data["exchange"]["recheck_minutes"] = 1
-                # مقدار پیش‌فرض بررسی عضویت: تصادفی بین ۱۰ تا ۲۰ ثانیه (فیکس دائمی).
-                # جفت قدیمی ۵-۱۵، ۱۵-۱۵ و ۱۵-۳۰ تنظیم پیش‌فرض قبلی بودند و چک دائمی نداشتند.
-                old_pair = (old_ex.get("check_min_sec"), old_ex.get("check_max_sec"))
-                if ("check_min_sec" not in old_ex or "check_max_sec" not in old_ex
-                        or old_pair in ((5, 15), (15, 15), (15, 30))):
-                    self.data["exchange"]["check_min_sec"] = 10
-                    self.data["exchange"]["check_max_sec"] = 20
-                if "check_interval_sec" not in old_ex or old_ex.get("check_interval_sec") in (15, 30):
-                    self.data["exchange"]["check_interval_sec"] = 20
-                if "response_delay_sec" not in old_ex:
-                    self.data["exchange"]["response_delay_sec"] = 15
-                # فیکس جدی: چک دائمی و لفت فوری بعد ۱ بار نبودن
-                # قبلاً max_strikes=3 بود و طرف بعد ۱۵ ثانیه لفت می‌داد و ما دیر لفت می‌دادیم
-                # الان پیش‌فرض ۱ است تا فوراً لفت بدهیم و چک دائمی داشته باشیم
-                if old_ex.get("max_strikes") in (None, 3):
-                    self.data["exchange"]["max_strikes"] = 1
-                if old_ex.get("recheck_hours") in (None, 12):
-                    self.data["exchange"]["recheck_hours"] = 0
-                if "permanent_check" not in old_ex:
-                    self.data["exchange"]["permanent_check"] = True
-                if "permanent_check_max_hours" not in old_ex:
-                    self.data["exchange"]["permanent_check_max_hours"] = 0
-                # پیش‌فرضِ «تعداد یادآوری» حالا دو است: دو پیام «نیومدی» با
-                # فاصله‌ی تصادفی و بعد از آن لفت. مقدارهای پیش‌فرض نسخه‌های
-                # قبل (۳ و ۱) به همین تعداد جدید مهاجرت می‌کنند؛ اگر کاربر
-                # عمداً عدد دیگری ثبت کرده باشد، دست نمی‌خورد.
-                if old_ex.get("max_reminders") in (None, 1, 3):
-                    self.data["exchange"]["max_reminders"] = 2
-                # فاصله‌ی پیش‌فرض یادآوری هم از ۵–۱۵ و ۲۰–۴۰ به ۱۰–۲۰ ثانیه‌ی تصادفی
-                # می‌رود تا دو پیام «نیومدی» هرگز پشت سر هم فرستاده نشوند و با چک دائمی همگام باشد.
-                if ((old_ex.get("reminder_min_sec"), old_ex.get("reminder_max_sec"))
-                        in ((5, 15), (5, 5), (15, 15), (20, 40))):
-                    self.data["exchange"]["reminder_min_sec"] = 10
-                    self.data["exchange"]["reminder_max_sec"] = 20
-                if old_ex.get("initiate") is False:
-                    self.data["exchange"]["initiate"] = True
-                if old_ex.get("auto_join") is False:
-                    self.data["exchange"]["auto_join"] = True
+                # ── مهاجرت یک‌بار (نسخه ۲) به پیش‌فرض‌های سالم ──
+                # نسخه‌های قبلی این مقادیر را «هر استارت» و بدون اجازه‌ی کاربر
+                # بازنویسی می‌کردند (مثلاً بررسی ۱۵-۳۰ را ۱۰-۲۰ یا اخطار ۳ را ۱).
+                # نتیجه: هیچ تنظیمی نمی‌چسبید و بارِ چک آن‌قدر زیاد بود که اکانت
+                # هر ۲۰-۳۰ دقیقه فلود می‌خورد. حالا این مهاجرت:
+                #   • فقط یک‌بار (پشت نشانِ _cfg_migrated_v2) اجرا می‌شود؛
+                #   • قبلش از فایل تنظیمات یک بکاپِ زمان‌دار گرفته می‌شود؛
+                #   • فقط مقدارهایی را که «پیش‌فرض/آلوده‌ی نسخه‌های قبل» هستند به
+                #     پیش‌فرض سالم جدید می‌برد؛ مقدار سفارشی کاربر دست نمی‌خورد؛
+                #   • بعد از آن هرگز هیچ مقدار موجودی بازنویسی نمی‌شود و فقط
+                #     کلیدهای گم‌شده از روی پیش‌فرض‌ها پر می‌شوند.
+                if not saved.get("_cfg_migrated_v2"):
+                    # بکاپ قبل از هر تغییری: تنظیمات + دیتابیس تبادل
+                    backup_settings_file(self.path)
+                    try:
+                        backup_settings_file(DB_FILE)
+                    except Exception:
+                        pass
+                    ex = self.data["exchange"]
+                    # فاصله بررسی عضویت: فقط جفت‌های قدیمی به ۱۵-۳۰ می‌روند
+                    pair = (old_ex.get("check_min_sec"), old_ex.get("check_max_sec"))
+                    if ("check_min_sec" not in old_ex or "check_max_sec" not in old_ex
+                            or pair in ((5, 15), (15, 15), (15, 30), (10, 20))):
+                        ex["check_min_sec"] = 15
+                        ex["check_max_sec"] = 30
+                    if old_ex.get("check_interval_sec") in (None, 15, 20, 30):
+                        ex["check_interval_sec"] = 30
+                    # لفت فقط بعد از ۲ نبودنِ تأییدشده (نه یک منفیِ تنها)
+                    if old_ex.get("max_strikes") in (None, 1, 3):
+                        ex["max_strikes"] = 2
+                    # نگهبانی عضویت با سقف ۲۴ ساعت (نه «تا ابد»)
+                    if old_ex.get("recheck_hours") in (None, 0, 12):
+                        ex["recheck_hours"] = 24
+                    if "permanent_check" not in old_ex:
+                        ex["permanent_check"] = True
+                    if old_ex.get("permanent_check_max_hours") in (None, 0):
+                        ex["permanent_check_max_hours"] = 24
+                    # دو پیام «نیومدی» با فاصله ۲۰-۴۰ ثانیه
+                    if old_ex.get("max_reminders") in (None, 1, 3):
+                        ex["max_reminders"] = 2
+                    rpair = (old_ex.get("reminder_min_sec"), old_ex.get("reminder_max_sec"))
+                    if ("reminder_min_sec" not in old_ex or "reminder_max_sec" not in old_ex
+                            or rpair in ((5, 15), (5, 5), (15, 15), (10, 20), (20, 40))):
+                        ex["reminder_min_sec"] = 20
+                        ex["reminder_max_sec"] = 40
+                    # کلیدهای گم‌شده از پیش‌فرض پر شوند (بدون بازنویسی مقدار موجود)
+                    if "response_delay_sec" not in old_ex:
+                        ex["response_delay_sec"] = 15
+                    if "initiate" not in old_ex:
+                        ex["initiate"] = True
+                    if "auto_join" not in old_ex:
+                        ex["auto_join"] = True
+                    self.data["_cfg_migrated_v2"] = True
+                    try:
+                        self.save()  # نشان را همین حالا ذخیره کن تا مهاجرت تکرار نشود
+                    except Exception:
+                        pass
                 if not old_ex.get("scan_pick") or old_ex.get("scan_pick") == 2:
                     self.data["exchange"]["scan_pick"] = 1
             except Exception as e:
@@ -453,7 +500,8 @@ class DB:
                               ("reminders", "INTEGER NOT NULL DEFAULT 0"),
                               ("next_reminder", "INTEGER NOT NULL DEFAULT 0"),
                               ("next_check", "INTEGER NOT NULL DEFAULT 0"),
-                              ("reminders_total", "INTEGER NOT NULL DEFAULT 0")):
+                              ("reminders_total", "INTEGER NOT NULL DEFAULT 0"),
+                              ("unk_streak", "INTEGER NOT NULL DEFAULT 0")):
                 if col not in have:
                     self.conn.execute(f"ALTER TABLE exchange ADD COLUMN {col} {decl}")
             # بعد از مهاجرت ساخته شود؛ وگرنه دیتابیس قدیمی هنوز ستون next_check ندارد.
@@ -695,9 +743,10 @@ class DB:
 class CheckGate:
     """پاس‌گاه سراسری درخواست‌های «بررسی عضویت» (GetParticipantRequest).
 
-    چک دائمیِ هر رکورد هر ۱۰–۲۰ ثانیه با N رکورد یعنی N×۳–۶ درخواست در
-    دقیقه — و سه مسیر همزمان (حلقه‌ی یادآوری، چک دوره‌ای، پیام ورودی)
-    بدون هماهنگی می‌زدند؛ نتیجه‌اش FloodWait «بی‌دلیل» بود. این پاس‌گاه
+    چک نگهبانیِ هر رکورد با فاصله‌ی تصادفی (پیش‌فرض ۱۵–۳۰ ثانیه که با سنِ
+    رکورد پلکانی بلند می‌شود) با N رکورد یعنی چند درخواست در دقیقه — و سه
+    مسیر همزمان (حلقه‌ی یادآوری، چک دوره‌ای، پیام ورودی) بدون هماهنگی
+    می‌زدند؛ نتیجه‌اش FloodWait «بی‌دلیل» بود. این پاس‌گاه
     همه‌ی مسیرها را از یک دریچه رد می‌کند:
       • حداقل فاصله بین دو درخواست؛ با تعداد رکوردها خودکار بلندتر می‌شود
       • روی FloodWait، کل بررسی‌ها تا پایان سقف متوقف می‌شود (نه اینکه
@@ -1249,7 +1298,7 @@ HELP = """🤖 راهنمای جفج
 تبادل سقف ساعتی روشن / تبادل سقف ساعتی خاموش
 تبادل بررسی ۱۵ ۳۰ — بررسی عضویت با فاصله تصادفی ۱۵ تا ۳۰ ثانیه
 تبادل زمان پاسخ ۱۵ — تأخیر پاسخ بعد از Join واقعی
-تبادل اخطار ۳ — بعد از سه بار نبودن لفت بده (این پیام نیست)
+تبادل اخطار ۲ — بعد از دو بار نبودنِ تأییدشده لفت بده (این پیام نیست؛ پیش‌فرض ۲)
 تبادل تعداد یادآوری ۲ — دو پیام «نیومدی» با فاصله؛ بعد از آن لفت (پیش‌فرض ۲؛ ۰ = بدون پیام)
 تبادل فاصله یادآوری ۲۰ ۴۰ — فاصله تصادفی بین دو پیام «نیومدی» (پیش‌فرض)
 🧠 تطبیقی هوشمند — فاصله جوین با FloodWait و آپ‌تایم خودکار زیاد می‌شود
@@ -1931,6 +1980,12 @@ class Engine:
             per_hour = int(x.get("adaptive_uptime_per_hour_sec", 10) or 10)
             extra_hours = int((uptime - thresh) // 3600)
             uptime_extra += extra_hours * per_hour
+        # سقف: جریمه‌ی آپ‌تایم هرگز بی‌نهایت رشد نمی‌کند؛ وگرنه روی سرورِ
+        # ۲۴/۷ (مثل رندر) بعد چند روز فاصله‌ی جوین به ده‌ها دقیقه می‌رسید و
+        # عملاً تبادل می‌خوابید.
+        up_max = int(x.get("adaptive_uptime_max_sec", 90) or 90)
+        if up_max > 0:
+            uptime_extra = min(uptime_extra, up_max)
         return flood_extra, uptime_extra, flood_extra + uptime_extra
 
     def effective_join_gap(self, now=None):
@@ -2025,6 +2080,7 @@ class Engine:
         up_thresh = int(x.get("adaptive_uptime_threshold_hours", 3) or 3)
         up_extra = int(x.get("adaptive_uptime_extra_sec", 30) or 30)
         up_per_h = int(x.get("adaptive_uptime_per_hour_sec", 10) or 10)
+        up_max = int(x.get("adaptive_uptime_max_sec", 90) or 90)
         last_flood = int(x.get("_adaptive_last_flood", 0) or 0)
         last_str = "هرگز" if not last_flood else f"{secs(int(time.time())-last_flood)} پیش"
         return "\n".join([
@@ -2041,6 +2097,7 @@ class Engine:
             f"⚙️ هر FloodWait: +{fa(flood_step)} ثانیه (سقف {fa(flood_max)} ثانیه)",
             f"♻️ کاهش خودکار: هر {fa(decay)} دقیقه بدون Flood، {fa(flood_step)} ثانیه کم می‌شود",
             f"⏳ کندشدن آپ‌تایم: بعد از {fa(up_thresh)} ساعت +{fa(up_extra)}ثانیه، هر ساعت اضافه +{fa(up_per_h)}ثانیه",
+            f"  • سقف اضافه آپ‌تایم: {fa(up_max)} ثانیه (بعدش بیشتر نمی‌شود تا جوین‌ها روی سرور طولانی‌مدت نخوابند)",
             f"🕒 آخرین Flood: {last_str}",
             f"🕒 آپ‌تایم فعلی: {secs(uptime)}",
             "",
@@ -2055,9 +2112,11 @@ class Engine:
         x = self.ex_cfg()
         on = bool(x.get("permanent_check", True))
         max_h = int(x.get("permanent_check_max_hours", 0) or 0)
-        check_min = int(x.get("check_min_sec", 10) or 10)
-        check_max = int(x.get("check_max_sec", 20) or 20)
-        strikes = int(x.get("max_strikes", 1) or 1)
+        check_min = int(x.get("check_min_sec", 15) or 15)
+        check_max = int(x.get("check_max_sec", 30) or 30)
+        rem_min = int(x.get("reminder_min_sec", 20) or 20)
+        rem_max = int(x.get("reminder_max_sec", 40) or 40)
+        strikes = int(x.get("max_strikes", 2) or 2)
         # آمار فعلی
         joined_cnt = len(self.db.ex_list("joined", 500))
         pending_check = len(self.db.ex_due(int(time.time()), 100))
@@ -2065,23 +2124,21 @@ class Engine:
             f"🔄 چک دائمی عضویت: {'🟢 روشن (تا ابد)' if on and max_h==0 else ('🟢 روشن' if on else '🔴 خاموش')}",
             "━━━━━━━━━━━━",
             f"وضعیت: {'تا ابد چک می‌کنم — هیچ‌وقت متوقف نمی‌شود' if on and max_h==0 else (f'روشن تا {fa(max_h)} ساعت بعد جوین' if on else 'خاموش')}",
-            f"فاصله چک دائمی: {fa(check_min)}–{fa(check_max)} ثانیه تصادفی (هر بار دوباره رندوم)",
-            f"فاصله «نیومدی»: {fa(check_min)}–{fa(check_max)} ثانیه تصادفی — دوبار می‌گوید بعد لفت (همگام با چک)",
-            f"لفت فوری چک دائمی: بعد از {fa(strikes)} بار نبودن → فوراً از کانالش لفت می‌دهم",
-            f"  (قبلاً ۳ بار بود و طرف بعد ۱۵ ثانیه لفت می‌داد و ما دیر می‌فهمیدیم)",
+            f"فاصله چک نگهبانی: {fa(check_min)}–{fa(check_max)} ثانیه تصادفی (هر بار دوباره رندوم)",
+            "  با سن رکورد پلکانی بلند می‌شود: تا ۳۰دقیقه ×۱، تا ۲ساعت ×۲، تا ۶ساعت ×۴، بعدش ×۸",
+            f"فاصله «نیومدی»: {fa(rem_min)}–{fa(rem_max)} ثانیه تصادفی — دوبار می‌گوید بعد لفت",
+            f"لفت: بعد از {fa(strikes)} بار نبودنِ تأییدشده (هرکدام با چک دوم) — نه با یک منفیِ تنها",
             "",
-            f"📊 الان {fa(joined_cnt)} کانال جوین‌شده تحت نظر دائمی",
+            f"📊 الان {fa(joined_cnt)} کانال جوین‌شده تحت نظر نگهبانی",
             f"⏳ {fa(pending_check)} مورد نوبت چک فوری",
             "",
             "⚙️ دستورها:",
-            "`تبادل بررسی ۱۰ ۲۰` → فاصله چک و «نیومدی» (پیش‌فرض ۱۰-۲۰ ثانیه، هر بار رندوم)",
-            "`تبادل اخطار ۱` → بعد چند بار نبودن لفت بده (پیش‌فرض ۱ = فوری)",
+            "`تبادل بررسی ۱۵ ۳۰` → فاصله چک عضویت (پیش‌فرض ۱۵-۳۰ ثانیه، هر بار رندوم)",
+            "`تبادل اخطار ۲` → بعد چند بار نبودن لفت بده (پیش‌فرض ۲)",
+            "`تبادل فاصله یادآوری ۲۰ ۴۰` → فاصله دو پیام «نیومدی»",
             "`تبادل دائمی روشن/خاموش`",
-            "`تبادل دائمی ساعت 0` → ۰=تا ابد، ۲۴=فقط ۲۴ ساعت چک کن",
+            "`تبادل دائمی ساعت 0` → ۰=تا ابد، ۲۴=فقط ۲۴ ساعت چک کن (پیش‌فرض ۲۴)",
             "`تبادل دائمی` → نمایش همین صفحه",
-            "",
-            "💡 فیکس باگ: قبلاً چک دائمی نبود و طرف بعد ۱۵ ثانیه لفت می‌داد",
-            "   الان هر ۱۰-۲۰ ثانیه چک می‌کنیم و «نیومدی» هم هر ۱۰-۲۰ ثانیه دوبار می‌گوید بعد لفت",
         ])
 
     def should_watch_joined(self, rec, now=None):
@@ -2859,24 +2916,24 @@ class Engine:
 
         if sub == "reminder_gap":
             if not rest:
-                return (f"فاصله یادآوری «نیومدی»: {fa(x.get('reminder_min_sec', 10))} تا "
-                        f"{fa(x.get('reminder_max_sec', 20))} ثانیه تصادفی (هر بار رندوم)\n"
-                        "`تبادل فاصله یادآوری ۱۰ ۲۰` — همگام با چک دائمی")
+                return (f"فاصله یادآوری «نیومدی»: {fa(x.get('reminder_min_sec', 20))} تا "
+                        f"{fa(x.get('reminder_max_sec', 40))} ثانیه تصادفی (هر بار رندوم)\n"
+                        "`تبادل فاصله یادآوری ۲۰ ۴۰` (پیش‌فرض)")
             rest = re.sub(r"\s*(?:ثانیه|ثانیه‌ای)\s*$", "", rest).strip()
             try:
                 ns = [num(v) for v in rest.split()]
                 lo = max(1, ns[0])
                 hi = max(lo, ns[1] if len(ns) > 1 else ns[0])
             except (ValueError, IndexError):
-                return "فرمت: `تبادل فاصله یادآوری ۱۰ ۲۰`"
+                return "فرمت: `تبادل فاصله یادآوری ۲۰ ۴۰`"
             x["reminder_min_sec"], x["reminder_max_sec"] = lo, hi
-            # همگام‌سازی: چک دائمی هم با همین بازه
+            # همگام‌سازی: چک عضویت هم با همین بازه
             x["check_min_sec"], x["check_max_sec"] = lo, hi
             x["check_interval_sec"] = hi if lo == hi else 0
             for r in self.db.ex_list("joined", 200):
                 self.db.ex_set(r["id"], next_check=0)
             self.st.save()
-            return f"🔔 فاصله یادآوری «نیومدی» و چک دائمی: **{fa(lo)}–{fa(hi)} ثانیه تصادفی** — دوبار «نیومدی» بعد لفت، هر بار رندوم"
+            return f"🔔 فاصله یادآوری «نیومدی» و چک عضویت: **{fa(lo)}–{fa(hi)} ثانیه تصادفی** — دوبار «نیومدی» بعد لفت، هر بار رندوم"
 
         if sub == "response_delay":
             if not rest:
@@ -2951,14 +3008,14 @@ class Engine:
                     f"فعال‌کردن: `تبادل سقف ساعتی روشن`  ·  تغییر عدد: `تبادل سقف ساعتی 60`")
 
         if sub == "every":
-            lo = max(1, int(x.get("check_min_sec", 10) or 10))
-            hi = max(lo, int(x.get("check_max_sec", 20) or 20))
+            lo = max(1, int(x.get("check_min_sec", 15) or 15))
+            hi = max(lo, int(x.get("check_max_sec", 30) or 30))
             if not rest:
                 if lo == hi:
                     return (f"هر {fa(lo)} ثانیه چک می‌شود\n"
-                            "`تبادل بررسی 10 20` برای حالت تصادفی")
+                            "`تبادل بررسی 15 30` برای حالت تصادفی")
                 return (f"چک عضویت: تصادفی بین {fa(lo)} تا {fa(hi)} ثانیه\n"
-                        "`تبادل بررسی 10 20`")
+                        "`تبادل بررسی 15 30`")
             rest = re.sub(r"\s*(?:ثانیه|ثانیه‌ای)\s*$", "", rest).strip()
             rest = re.sub(r"^(?:تصادفی|نوسانی|رندوم)\s+", "", rest).strip()
             try:
@@ -2966,7 +3023,7 @@ class Engine:
                 lo, hi = max(1, ns[0]), max(1, ns[1] if len(ns) > 1 else ns[0])
                 hi = max(lo, hi)
             except (ValueError, IndexError):
-                return "فرمت: `تبادل بررسی 10 20` یا `تبادل بررسی 20`"
+                return "فرمت: `تبادل بررسی 15 30` یا `تبادل بررسی 30`"
             x["check_min_sec"], x["check_max_sec"] = lo, hi
             # همگام‌سازی: فاصله یادآوری «نیومدی» هم با همین بازه تصادفی تنظیم می‌شود
             # تا هر بار که بخواهد بگوید بین همون عدد تصادفی که تنظیم کردی باشد.
@@ -3008,7 +3065,10 @@ class Engine:
                 x["permanent_check_max_hours"] = 0
                 x["recheck_hours"] = 0
                 self.st.save()
-                return "🔄 چک دائمی **روشن** شد — تا ابد هر ۱۰-۲۰ ثانیه چک می‌کنم، اگر طرف لفت داد فوراً از کانالش لفت می‌دهم.\n" + self.permanent_check_status_text()
+                return ("🔄 چک دائمی **روشن** شد — بدون سقف زمانی چک می‌کنم "
+                        "(فاصله با سن رکورد پلکانی بلند می‌شود)، اگر طرف لفت داد "
+                        "بعد از چند نبودنِ تأییدشده از کانالش لفت می‌دهم.\n"
+                        + self.permanent_check_status_text())
             if rest_low in ("off", "خاموش", "غیرفعال"):
                 x["permanent_check"] = False
                 self.st.save()
@@ -3077,15 +3137,16 @@ class Engine:
 
         if sub == "strikes":
             if not rest:
-                return (f"بعد از {fa(x['max_strikes'])} بار نبودن لفت می‌دهم\n"
-                        "`تبادل اخطار ۳`")
+                return (f"بعد از {fa(x['max_strikes'])} بار نبودنِ تأییدشده لفت می‌دهم "
+                        "(پیش‌فرض ۲ — هر بار با چک دوم تأیید می‌شود)\n"
+                        "`تبادل اخطار ۲`")
             try:
                 v = max(1, num(rest))
             except ValueError:
-                return "عدد بده: `تبادل اخطار ۳`"
+                return "عدد بده: `تبادل اخطار ۲`"
             x["max_strikes"] = v
             self.st.save()
-            return f"⚠️ بعد از **{fa(v)} بار** نبودن، لفت می‌دهم."
+            return f"⚠️ بعد از **{fa(v)} بار** نبودنِ تأییدشده، لفت می‌دهم."
 
         if sub in ("list", "l", "فهرست"):
             return self.ex_list_text()
@@ -3263,8 +3324,8 @@ class Engine:
             f"  • Flood اضافه: {fa(f_extra)}ثانیه | آپ‌تایم اضافه: {fa(u_extra)}ثانیه",
             f"گزارش خصوصی: {'لحظه‌ای' if x.get('report_mode', 'live') == 'live' else ('خلاصه' if x.get('report_mode') == 'summary' else 'خاموش')} در PV",
             f"پیام عضو‌نشده: حداکثر {fa(max(0, int(x.get('max_reminders', 2) or 0)))} بار «نیومدی» با فاصله تصادفی؛ بعد از آن لفت",
-            f"فاصله یادآوری «نیومدی»: {fa(x.get('reminder_min_sec', 10))} تا {fa(x.get('reminder_max_sec', 20))} ثانیه تصادفی (هر بار دوباره رندوم، همگام با چک دائمی)",
-            f"چک عضویت دائمی: {fa(x.get('check_min_sec', 10))}–{fa(x.get('check_max_sec', 20))} ثانیه | لفت بعد {fa(x.get('max_strikes',1))} بار | {perm_label}   `تبادل دائمی`",
+            f"فاصله یادآوری «نیومدی»: {fa(x.get('reminder_min_sec', 20))} تا {fa(x.get('reminder_max_sec', 40))} ثانیه تصادفی (هر بار دوباره رندوم)",
+            f"چک عضویت: {fa(x.get('check_min_sec', 15))}–{fa(x.get('check_max_sec', 30))} ثانیه (پلکانی با سن رکورد) | لفت بعد {fa(x.get('max_strikes', 2))} نبودنِ تأییدشده | {perm_label}   `تبادل دائمی`",
             f"پاسخ بعد از Join واقعی: {fa(x.get('response_delay_sec', 15))} ثانیه",
             f"انتخاب پیام: مورد {fa(x.get('scan_pick', 2) or 2)} از جدیدترین‌ها",
             f"اسکن گروه: هر {secs(max(30, int(x.get('scan_every_sec', 30) or 30)))}",
@@ -3281,8 +3342,8 @@ class Engine:
             "🚶 حالت پیش‌قدم:",
             "از هر گروه ثبت‌شده، آخرین پیام دارای لینک خوانده می‌شود و لینک در نوبت Join قرار می‌گیرد.",
             "",
-            "🔄 فیکس چک دائمی:",
-            "قبلاً بعد ۱۵ ثانیه طرف لفت می‌داد و چک دائمی نبود — الان هر ۱۰-۲۰ ثانیه تا ابد چک می‌کنیم و بعد ۱ بار نبودن فوراً لفت می‌دهیم.",
+            "🔄 نگهبانی عضویت:",
+            "بعد از جوین، عضویت طرف تا سقف مشخص (پیش‌فرض ۲۴ ساعت) چک می‌شود؛ فاصله‌ی چک با سن رکورد پلکانی بلند می‌شود و لفت فقط بعد از چند نبودنِ تأییدشده انجام می‌شود.",
             "",
             "📌 دستورهای اصلی:",
             "روشن: `تبادل روشن`",
@@ -3298,10 +3359,10 @@ class Engine:
             "گزارش خلاصه همین حالا: `گزارش خلاصه`",
             "فاصله Join: `تبادل فاصله`",
             "تطبیقی هوشمند: `تبادل تطبیقی` (Flood + آپ‌تایم)",
-            "چک دائمی: `تبادل دائمی` (فیکس ۱۵ ثانیه‌ای)",
-            "بررسی عضویت: `تبادل بررسی ۱۰ ۲۰`",
-            "اخطار لفت: `تبادل اخطار ۱` (۱=فوری)",
-            "نوسان یادآوری: `تبادل فاصله یادآوری 5 15`",
+            "نگهبانی عضویت: `تبادل دائمی` (سقف ساعت + وضعیت)",
+            "بررسی عضویت: `تبادل بررسی ۱۵ ۳۰`",
+            "اخطار لفت: `تبادل اخطار ۲` (پیش‌فرض ۲ نبودنِ تأییدشده)",
+            "نوسان یادآوری: `تبادل فاصله یادآوری 20 40`",
             "اسکن فوری: `تبادل اسکن`",
             "ارسال دوباره پیام: `تبادل ارسال شماره`",
             "",
@@ -3768,7 +3829,7 @@ class Engine:
             f"{fa(p['min_gap_sec'])} تا {fa(p['max_gap_sec'])} ثانیه",
             [
                 ("🎲  نمونه ارسال", "نوسان‌ویژه ۲۰ ۴۵"),
-                ("🔔  نوسان یادآوری تبادل", "تبادل فاصله یادآوری 5 15"),
+                ("🔔  نوسان یادآوری تبادل", "تبادل فاصله یادآوری 20 40"),
                 ("↩️  بازگشت", "ویژه"),
             ],
         )
@@ -5018,21 +5079,45 @@ async def connect_and_run(eng, creds):
         return 999999999
 
     def reminder_delay():
-        """فاصله‌ی تصادفی بین دو پیام «نیومدی»؛ پیش‌فرض ۱۰ تا ۲۰ ثانیه تصادفی، همگام با چک دائمی.
-        هر بار که بخواهد بگوید بین همون عدد تصادفی که تنظیم کردی (۱۰–۲۰) است، دوبار می‌گوید بعد لفت.
+        """فاصله‌ی تصادفی بین دو پیام «نیومدی»؛ پیش‌فرض ۲۰ تا ۴۰ ثانیه تصادفی.
+        هر بار که بخواهد بگوید بین همون عدد تصادفی که تنظیم کردی (پیش‌فرض ۲۰–۴۰)
+        است، دوبار می‌گوید بعد لفت.
         دو پیام عضو‌نشده هرگز پشت سر هم فرستاده نمی‌شوند."""
         x = eng.ex_cfg()
         # اگر کاربر فقط چک را تنظیم کرده، یادآوری هم از همان بازه استفاده کند
-        lo = max(1, int(x.get("reminder_min_sec", x.get("check_min_sec", 10)) or 10))
-        hi = max(lo, int(x.get("reminder_max_sec", x.get("check_max_sec", 20)) or 20))
+        lo = max(1, int(x.get("reminder_min_sec", x.get("check_min_sec", 20)) or 20))
+        hi = max(lo, int(x.get("reminder_max_sec", x.get("check_max_sec", 40)) or 40))
         return random.randint(lo, hi)
 
     def membership_check_delay():
         """فاصله بی‌صدای بررسی عضویت؛ هر بار دوباره تصادفی انتخاب می‌شود."""
         x = eng.ex_cfg()
-        lo = max(1, int(x.get("check_min_sec", 10) or 10))
-        hi = max(lo, int(x.get("check_max_sec", 20) or 20))
+        lo = max(1, int(x.get("check_min_sec", 15) or 15))
+        hi = max(lo, int(x.get("check_max_sec", 30) or 30))
         return random.randint(lo, hi)
+
+    def watch_delay_seconds(rec):
+        """فاصله‌ی چک نگهبانی بر اساس سنِ رکورد — پلکانی بلند می‌شود.
+        قبلاً هر رکورد جوین‌شده «تا ابد» هر ۱۰–۲۰ ثانیه چک می‌شد؛ با زیادشدن
+        رکوردها بارِ GetParticipant آن‌قدر بالا می‌رفت که اکانت هر ۲۰–۳۰
+        دقیقه FloodWait می‌خورد. حالا:
+          نیم‌ساعت اول: بازه‌ی تنظیم‌شده (پیش‌فرض ۱۵–۳۰ ثانیه)
+          تا ۲ ساعت: ۲ برابر | تا ۶ ساعت: ۴ برابر | بعدش: ۸ برابر
+        بعد از سقف ساعتِ نگهبانی (پیش‌فرض ۲۴ ساعت) چک کلاً متوقف می‌شود."""
+        base = membership_check_delay()
+        try:
+            joined_at = int(rec.get("joined_at") or rec.get("created_at")
+                            or time.time())
+        except Exception:
+            return base
+        age_h = (time.time() - joined_at) / 3600.0
+        if age_h <= 0.5:
+            return base
+        if age_h <= 2:
+            return base * 2
+        if age_h <= 6:
+            return base * 4
+        return base * 8
 
     def response_delay_seconds():
         """تأخیر تصادفی پاسخ موفق «جوین شدم» روی پیام طرف.
@@ -5346,7 +5431,10 @@ async def connect_and_run(eng, creds):
             # اگر همین حالا نوبتِ یادآوری/لفتِ این طرف فعال است، پیامِ
             # تازه‌ای پشت سر همان نمی‌رود؛ همان زمان‌بندی کار خودش را
             # می‌کند تا دو پیام «نیومدی» پشت سر هم نیفتند.
-            active_window = int(rec.get("next_reminder") or 0) > now0
+            # فیکس مسابقه: «منقضی‌شده ولی هنوز پردازش‌نشده» هم فعال حساب
+            # می‌شود؛ قبلاً اگر حلقه‌ی یادآوری وسط پردازش بود، این مسیر هم
+            # همزمان پیام می‌فرستاد و دو «نیومدی» تقریباً پشت‌سرهم می‌رفت.
+            active_window = int(rec.get("next_reminder") or 0) > 0
             if rec["status"] == "joined":
                 # رکورد پیش‌قدم را خراب نکن؛ دو یادآوری فاصله‌دار می‌رود
                 # و اگر طرف تا آن موقع نیامد، از کانالش لفت می‌دهم.
@@ -5364,9 +5452,12 @@ async def connect_and_run(eng, creds):
                     send_now = True
                 eng.db.ex_set(rec["id"], status="pending",
                               strikes=0 if fresh else rec["strikes"] + 1,
+                              unk_streak=0,
                               direction="in",
                               src_chat=event.chat_id, src_msg=event.id,
                               replied=0, reminders=old_count,
+                              # در دور تازه، نوبت مانده از دور قبلی بی‌معنی است
+                              next_reminder=0 if fresh else int(rec.get("next_reminder") or 0),
                               note="عضو نیست — دو یادآوری فاصله‌دار، بعد لفت")
             eng.log("info", "ex_notmember", sender_name)
             # اولین «نیومدی» همین حالا می‌رود؛ اگر متن سفارشی ثبت شده باشد
@@ -5706,7 +5797,7 @@ async def connect_and_run(eng, creds):
                                       else rec["status"],
                                       reminders=0, reminders_total=0,
                                       next_reminder=0,
-                                      strikes=0, replied=0,
+                                      strikes=0, unk_streak=0, replied=0,
                                       note="عضو شد — آماده Join")
                     elif still is False:
                         count = int(rec.get("reminders") or 0)
@@ -5717,7 +5808,7 @@ async def connect_and_run(eng, creds):
                             if sent:
                                 count += 1
                                 eng.db.ex_set(rec["id"], reminders=count,
-                                              strikes=0,
+                                              strikes=0, unk_streak=0,
                                               next_reminder=int(now2 + reminder_delay()),
                                               note="یادآوری ارسال شد")
                             else:
@@ -5780,26 +5871,31 @@ async def connect_and_run(eng, creds):
                         # قبلاً همین‌جا تا ابد با فاصله کوتاه دوباره چک
                         # می‌شد — بی‌صدا و بی‌اثر. حالا بعد از ۵ بار
                         # پشت‌سرهم فاصله بلند می‌شود و هشدار می‌رود.
-                        unk = int(rec.get("strikes") or 0) + 1
+                        # مهم: نتیجه‌ی «نامشخص» شمارنده‌ی مخصوص خودش
+                        # (unk_streak) را دارد؛ هرگز روی strikes واقعی
+                        # اثر نمی‌گذارد تا فلود/خطای API باعث لفتِ اشتباه نشود.
+                        unk = int(rec.get("unk_streak") or 0) + 1
                         if unk >= 5:
-                            eng.db.ex_set(rec["id"], strikes=unk,
+                            eng.db.ex_set(rec["id"], unk_streak=unk,
                                           next_reminder=int(now2 + 600),
                                           note="بررسی عضویت مدتی است نامشخص — ۱۰ دقیقه صبر")
                             await warn_membership_check_broken(now2)
                         else:
-                            eng.db.ex_set(rec["id"], strikes=unk,
+                            eng.db.ex_set(rec["id"], unk_streak=unk,
                                           next_reminder=int(now2 + membership_check_delay()),
                                           note="بررسی عضویت نامشخص است")
 
-                # ۳) چک دوره‌ای دائمی: طرف هنوز عضو کانال من هست؟
-                # فیکس باگ: قبلاً چک دائمی نبود و طرف بعد ۱۵ ثانیه لفت می‌داد.
-                # الان هر ۱۰–۲۰ ثانیه تصادفی چک می‌کنیم تا ابد (یا تا سقف ساعت).
-                # بعد ۱ بار نبودن فوراً لفت می‌دهیم.
+                # ۳) چک دوره‌ای نگهبانی: طرف هنوز عضو کانال من هست؟
+                # فاصله‌ی چک با سن رکورد پلکانی بلند می‌شود (watch_delay_seconds)
+                # و بعد از سقف ساعتِ نگهبانی (پیش‌فرض ۲۴ ساعت) متوقف می‌شود.
+                # لفت فقط بعد از چند نبودنِ تأییدشده انجام می‌شود (پیش‌فرض ۲ بار)،
+                # نه با یک منفیِ تنها؛ نتیجه‌های «نامشخص» (فلود/خطا) اصلاً
+                # جزو اخطارها حساب نمی‌شوند.
                 for rec in eng.db.ex_due(int(time.time()), 5):
                     if not rec["peer_id"]:
                         now_no_peer = int(time.time())
                         eng.db.ex_set(rec["id"], last_check=now_no_peer,
-                                      next_check=now_no_peer + membership_check_delay())
+                                      next_check=now_no_peer + watch_delay_seconds(rec))
                         continue
                     # اگر چک دائمی خاموش یا مهلتش گذشته → دیگر چک نکن
                     if not eng.should_watch_joined(rec):
@@ -5815,14 +5911,14 @@ async def connect_and_run(eng, creds):
                             and max(0, int(x.get("max_reminders", 2) or 0)) >= 1):
                         now_skip = int(time.time())
                         eng.db.ex_set(rec["id"], last_check=now_skip,
-                                      next_check=now_skip + membership_check_delay())
+                                      next_check=now_skip + watch_delay_seconds(rec))
                         continue
                     still = await confirm_peer_membership(rec["peer_id"])
                     now = int(time.time())
                     if still is True:
                         eng.db.ex_set(rec["id"], last_check=now,
-                                      next_check=now + membership_check_delay(),
-                                      strikes=0, reminders_total=0,
+                                      next_check=now + watch_delay_seconds(rec),
+                                      strikes=0, unk_streak=0, reminders_total=0,
                                       note="عضو است")
                     elif still is False:
                         st = rec["strikes"] + 1
@@ -5839,13 +5935,13 @@ async def connect_and_run(eng, creds):
                             sent0 = await send_not_joined_reminder(rec)
                             nowf = int(time.time())
                             eng.db.ex_set(rec["id"],
-                                          strikes=1, last_check=nowf,
+                                          strikes=1, unk_streak=0, last_check=nowf,
                                           next_check=0,
                                           reminders=1 if sent0 else 0,
                                           reminders_total=(int(rec.get("reminders_total") or 0)
                                                            + (1 if sent0 else 0)),
                                           next_reminder=nowf + reminder_delay(),
-                                          note="نیومد — دور «نیومدی» شروع شد (چک دائمی)")
+                                          note="نیومد — دور «نیومدی» شروع شد (چک نگهبانی)")
                             eng.log("info", "ex_first_miss",
                                     f"#{rec['id']} {rec['link']}")
                             await asyncio.sleep(2)
@@ -5855,7 +5951,7 @@ async def connect_and_run(eng, creds):
                             eng.db.ex_set(rec["id"],
                                           status="left" if ok else "failed",
                                           last_check=now, next_check=0,
-                                          strikes=st,
+                                          strikes=st, unk_streak=0,
                                           note="لفت داد → لفت دادم" if ok else err)
                             eng.log("info", "ex_left", f"#{rec['id']} {rec['link']}")
                             if ok and rec.get("direction") == "out":
@@ -5863,27 +5959,34 @@ async def connect_and_run(eng, creds):
                                 x["_scan_now"] = True
                             # رفع باگ: به کسی که جوین کرده ولی واقعاً عضو نشده
                             # (دروغگو) همین‌جا «نیومدی» بگو — نه فقط پیش‌قدم‌ها.
+                            # اگر در دورِ اخطارها قبلاً پیام گرفته، تکرارش نکن.
                             if x["reply"] and rec.get("peer_id") and ok:
                                 rec2 = eng.db.ex_get(rec["id"])
-                                await send_not_joined_reminder(rec2)
+                                if not int(rec2.get("reminders") or 0):
+                                    await send_not_joined_reminder(rec2)
                             if eng.ex_cfg().get("report_mode", "live") == "live":
                                 await note(eng.ex_live_leave_text(rec, "" if ok else err))
                         else:
                             # در مرز، فقط یک‌بار یادآوری «نیومدی» بفرست؛ سپس بی‌صدا.
                             reminded = int(rec.get("reminders") or 0)
+                            extra_total = 0
                             if x["reply"] and rec.get("peer_id") and st == 1 \
                                     and reminded < max(1, int(x.get("max_reminders", 2) or 1)):
                                 sent = await send_not_joined_reminder(eng.db.ex_get(rec["id"]))
                                 if sent:
                                     reminded += 1
+                                    extra_total = 1
                             eng.db.ex_set(rec["id"], last_check=now,
-                                          next_check=now + membership_check_delay(),
-                                          strikes=st, reminders=reminded,
+                                          next_check=now + watch_delay_seconds(rec),
+                                          strikes=st, unk_streak=0, reminders=reminded,
+                                          reminders_total=(int(rec.get("reminders_total") or 0)
+                                                           + extra_total),
                                           note=f"عضو نیست ({st}/{x['max_strikes']})")
                             eng.log("info", "ex_strike",
                                     f"#{rec['id']} {st}/{x['max_strikes']}")
                     else:
-                        # نامشخص در چک دائمی.
+                        # نامشخص در چک نگهبانی (فلود/خطای API) — هرگز اخطارِ
+                        # لفت حساب نمی‌شود؛ شمارنده‌ی جدای خودش را دارد.
                         if check_gate.blocked():
                             eng.db.ex_set(rec["id"], last_check=now,
                                           next_check=now + 60,
@@ -5891,16 +5994,16 @@ async def connect_and_run(eng, creds):
                             continue
                         # بعد از ۵ بار نامشخصِ واقعی (نه فلود)، فاصله بلند
                         # کن و یک‌بار هشدار بده.
-                        unk = int(rec.get("strikes") or 0) + 1
+                        unk = int(rec.get("unk_streak") or 0) + 1
                         if unk >= 5:
                             eng.db.ex_set(rec["id"], last_check=now,
-                                          next_check=now + 600, strikes=unk,
+                                          next_check=now + 600, unk_streak=unk,
                                           note="بررسی عضویت مدتی است نامشخص — ۱۰ دقیقه صبر")
                             await warn_membership_check_broken(now)
                         else:
                             eng.db.ex_set(rec["id"], last_check=now,
-                                          next_check=now + membership_check_delay(),
-                                          strikes=unk)
+                                          next_check=now + watch_delay_seconds(rec),
+                                          unk_streak=unk)
                     await asyncio.sleep(2)
 
                 # برای دقت فاصله‌ی یادآوری، بیشتر از دو ثانیه در صف نمان.
