@@ -16,10 +16,11 @@ the code) that had NO test coverage before:
      * command surface ``تبادل تطبیقی`` (روشن/خاموش/ریست/flood/max/
        decay/uptime/extra + Persian digits + bad format + status).
 
-  2. Permanent membership check (چک دائمی — فیکس لفت ۱۵ ثانیه‌ای)
-     * defaults: permanent_check True, max hours 0 (تا ابد),
-       max_strikes 1 (فوری), check window 10–20 s;
-     * ``should_watch_joined``: forever / capped hours / off,
+  2. Membership watch (نگهبانی عضویت — فیکس لفت ۱۵ ثانیه‌ای + فیکس فلود)
+     * defaults: permanent_check True, max hours 24 (نه تا ابد),
+       max_strikes 2 (لفت فقط بعد از ۲ نبودنِ تأییدشده), check window 15–30 s,
+       reminder window 20–40 s;
+     * ``should_watch_joined``: capped hours / unlimited (ساعت ۰) / off,
        including the exact 24 h boundary;
      * command surface ``تبادل دائمی`` (روشن/خاموش/ساعت N/ساعت ۰/وضعیت).
 
@@ -105,16 +106,18 @@ must = {
     "_adaptive_flood_extra": 0,
     "_adaptive_last_flood": 0,
     "_adaptive_last_decay": 0,
-    # چک دائمی
+    # نگهبانی عضویت (پیش‌فرض‌های سالم نسخه ۲)
     "permanent_check": True,
-    "permanent_check_max_hours": 0,
-    "max_strikes": 1,
-    "recheck_hours": 0,
-    "check_min_sec": 10,
-    "check_max_sec": 20,
-    # یادآوری همگام با چک
-    "reminder_min_sec": 10,
-    "reminder_max_sec": 20,
+    "permanent_check_max_hours": 24,
+    "max_strikes": 2,
+    "recheck_hours": 24,
+    "check_min_sec": 15,
+    "check_max_sec": 30,
+    # یادآوری
+    "reminder_min_sec": 20,
+    "reminder_max_sec": 40,
+    # سقف جریمه‌ی آپ‌تایمِ تطبیقی (بی‌نهایت رشد نمی‌کند)
+    "adaptive_uptime_max_sec": 90,
     # ضد اسپم چندگروهی
     "scan_jitter_min_sec": 5,
     "scan_jitter_max_sec": 15,
@@ -146,6 +149,10 @@ check(eng.adaptive_extra(T) == (0, 30, 30), "uptime just past 3h → +30 s")
 eng.started = T - (5 * 3600 + 30)   # 2 full extra hours → +30 +2*10
 check(eng.adaptive_extra(T) == (0, 50, 50), "uptime 5h → +50 s (30+2*10)")
 check(eng.effective_join_gap(T) == (80, 110), "effective gap = base + uptime")
+# uptime cap: روی سرور ۲۴/۷ جریمه بی‌نهایت رشد نمی‌کند (سقف ۹۰ ثانیه)
+eng.started = T - 24 * 3600          # 24 h uptime → 30+21*10=240 → capped 90
+check(eng.adaptive_extra(T) == (0, 90, 90), "uptime 24h → capped at +90 s")
+check(eng.effective_join_gap(T) == (120, 150), "effective gap respects uptime cap")
 eng.started = T                      # back to fresh
 
 # flood escalation: +15 per FloodWait, throttle follows
@@ -277,10 +284,13 @@ r1, _ = eng.db.ex_add(777001, "perm1", "@perm_test_1")
 eng.db.ex_set(r1["id"], status="joined", joined_at=now - 10)
 rec_fresh = eng.db.ex_get(r1["id"])
 check(eng.should_watch_joined(rec_fresh, now) is True,
-      "default: watch forever (تا ابد)")
+      "default: fresh record watched (cap 24 h)")
+eng.db.ex_set(r1["id"], joined_at=now - 25 * 3600)
+check(eng.should_watch_joined(eng.db.ex_get(r1["id"]), now) is False,
+      "default: 25 h old record NOT watched (cap 24 h, not forever)")
 
 out = eng.exchange_cmd("دائمی")
-check("چک دائمی" in out and "تا ابد" in out, "دائمی → status page (تا ابد)")
+check("چک دائمی" in out and "۲۴" in out, "دائمی → status page (تا ۲۴ ساعت)")
 
 # capped hours
 out = eng.exchange_cmd("دائمی ساعت 24")
@@ -406,7 +416,7 @@ print("DONE synced windows")
 
 
 # ════════════════════════════════════════════════════════════
-# 8. Migration of legacy settings → round2 defaults
+# 8. Migration of legacy settings → پیش‌فرض‌های سالم نسخه ۲ (یک‌بار + بکاپ)
 # ════════════════════════════════════════════════════════════
 def legacy_file(name, extra):
     old = json.loads(json.dumps(m.DEFAULTS))
@@ -417,49 +427,60 @@ def legacy_file(name, extra):
               "_adaptive_flood_extra", "_adaptive_last_flood",
               "_adaptive_last_decay", "scan_jitter_min_sec",
               "scan_jitter_max_sec", "scan_last_time",
-              "permanent_check", "permanent_check_max_hours"):
+              "permanent_check", "permanent_check_max_hours",
+              "adaptive_uptime_max_sec"):
         ex.pop(k, None)          # old installs don't have the new keys
+    # مقادیر آلوده‌ای که مهاجرت اجباری نسخه‌ی قبل هر استارت می‌نوشت
+    ex["check_min_sec"] = 10
+    ex["check_max_sec"] = 20
+    ex["reminder_min_sec"] = 10
+    ex["reminder_max_sec"] = 20
+    ex["max_strikes"] = 1
+    ex["recheck_hours"] = 0
     ex.update(extra)
+    old.pop("_cfg_migrated_v2", None)   # فایل قدیمی نشانِ مهاجرت ندارد
     with open(name, "w", encoding="utf-8") as f:
         json.dump(old, f)
     return m.Settings(name)
 
 
 st = legacy_file("legacy1.json", {
-    "check_min_sec": 15, "check_max_sec": 30,   # old round1 default pair
+    "check_min_sec": 15, "check_max_sec": 30,   # جفت پیش‌فرض خیلی قدیمی
     "check_interval_sec": 15,
-    "max_strikes": 3, "recheck_hours": 12,       # old behaviour
+    "max_strikes": 3, "recheck_hours": 12,       # رفتار قدیمی
     "reminder_min_sec": 20, "reminder_max_sec": 40,
 })
 e1 = st.data["exchange"]
-check(e1["check_min_sec"] == 10 and e1["check_max_sec"] == 20,
-      "migration: legacy check 15-30 → 10-20")
-check(e1["check_interval_sec"] == 20, "migration: legacy interval 15 → 20")
-check(e1["max_strikes"] == 1, "migration: legacy strikes 3 → 1 (فوری)")
-check(e1["recheck_hours"] == 0, "migration: legacy recheck 12 h → 0 (تا ابد)")
+check(e1["check_min_sec"] == 15 and e1["check_max_sec"] == 30,
+      "migration: legacy check → پیش‌فرض سالم 15-30")
+check(e1["check_interval_sec"] == 30, "migration: legacy interval → 30")
+check(e1["max_strikes"] == 2, "migration: legacy strikes → 2 (تأییدشده)")
+check(e1["recheck_hours"] == 24, "migration: legacy recheck → 24 h")
 check(e1["permanent_check"] is True, "migration: permanent_check default on")
-check(e1["permanent_check_max_hours"] == 0, "migration: max hours default 0")
-check(e1["reminder_min_sec"] == 10 and e1["reminder_max_sec"] == 20,
-      "migration: legacy reminder 20-40 → 10-20")
+check(e1["permanent_check_max_hours"] == 24, "migration: max hours default 24")
+check(e1["reminder_min_sec"] == 20 and e1["reminder_max_sec"] == 40,
+      "migration: legacy reminder → پیش‌فرض سالم 20-40")
 check(e1["scan_jitter_min_sec"] == 5 and e1["scan_jitter_max_sec"] == 15,
       "migration: jitter keys filled with 5-15")
 check(e1["scan_last_time"] == {}, "migration: scan_last_time filled")
 check(e1["adaptive_on"] is True and e1["_adaptive_flood_extra"] == 0,
       "migration: adaptive keys filled with defaults")
+check(st.data.get("_cfg_migrated_v2") is True,
+      "migration: one-time marker set (never runs again)")
 
 # even older default pairs migrate too
 st = legacy_file("legacy2.json", {"check_min_sec": 5, "check_max_sec": 15,
                                   "reminder_min_sec": 5, "reminder_max_sec": 5})
 e2 = st.data["exchange"]
-check(e2["check_min_sec"] == 10 and e2["check_max_sec"] == 20,
-      "migration: ancient check pair 5-15 → 10-20")
-check(e2["reminder_min_sec"] == 10 and e2["reminder_max_sec"] == 20,
-      "migration: ancient reminder pair 5-5 → 10-20")
+check(e2["check_min_sec"] == 15 and e2["check_max_sec"] == 30,
+      "migration: ancient check pair 5-15 → 15-30")
+check(e2["reminder_min_sec"] == 20 and e2["reminder_max_sec"] == 40,
+      "migration: ancient reminder pair 5-5 → 20-40")
 
 # deliberately custom values survive migration untouched
 st = legacy_file("legacy3.json", {
     "check_min_sec": 11, "check_max_sec": 33, "check_interval_sec": 45,
-    "max_strikes": 2, "recheck_hours": 5,
+    "max_strikes": 4, "recheck_hours": 5,
     "reminder_min_sec": 7, "reminder_max_sec": 9,
     "permanent_check": False,
 })
@@ -467,11 +488,27 @@ e3 = st.data["exchange"]
 check(e3["check_min_sec"] == 11 and e3["check_max_sec"] == 33,
       "migration keeps custom check window")
 check(e3["check_interval_sec"] == 45, "migration keeps custom interval")
-check(e3["max_strikes"] == 2, "migration keeps custom strikes")
+check(e3["max_strikes"] == 4, "migration keeps custom strikes")
 check(e3["recheck_hours"] == 5, "migration keeps custom recheck hours")
 check(e3["reminder_min_sec"] == 7 and e3["reminder_max_sec"] == 9,
       "migration keeps custom reminder window")
 check(e3["permanent_check"] is False, "migration keeps explicit permanent off")
+
+# مهاجرت فقط یک‌بار است: بار دوم هیچ بازنویسی اتفاق نمی‌افتد و مقدارِ
+# سفارشیِ کاربر (حتی اگر شبیه پیش‌فرض قدیمی باشد) دست‌نخورده می‌ماند.
+st = legacy_file("legacy4.json", {"check_min_sec": 15, "check_max_sec": 30})
+check(st.data.get("_cfg_migrated_v2") is True, "first load migrates + marks")
+with open("legacy4.json", encoding="utf-8") as f:
+    ondisk = json.load(f)
+check(ondisk.get("_cfg_migrated_v2") is True, "marker persisted to disk")
+st2 = m.Settings("legacy4.json")          # reload → marker present
+check(st2.data["exchange"]["check_min_sec"] == 15
+      and st2.data["exchange"]["check_max_sec"] == 30,
+      "second load: user value kept, migration NOT re-run")
+# backup of the pre-migration file was created
+import glob as _glob
+check(len(_glob.glob("legacy4.json.bak-*")) >= 1,
+      "migration created a timestamped backup before touching data")
 print("DONE migration")
 
 
@@ -484,7 +521,7 @@ eng.adaptive_on_flood(30, now=int(time.time()))   # +15 adaptive
 
 text = eng.exchange_text()
 check("فاصله موثر (تطبیقی)" in text, "exchange panel shows effective gap")
-check("چک عضویت دائمی" in text, "exchange panel shows permanent check line")
+check("چک عضویت:" in text, "exchange panel shows membership check line")
 check("ضد اسپم چندگروهی" in text, "exchange panel shows anti-spam line")
 check("فاصله Join پایه" in text, "exchange panel shows base gap")
 
@@ -515,7 +552,7 @@ check("groups_count >= 2 and not manual" in src,
       "scan jitter only for >=2 groups in automatic scans")
 check("random.randint(jitter_min, jitter_max)" in src,
       "scan jitter sleeps a random amount in range")
-check('x.get("reminder_min_sec", x.get("check_min_sec", 10))' in src,
+check('x.get("reminder_min_sec", x.get("check_min_sec", 20))' in src,
       "reminder delay falls back to the check window (synced)")
 check('"permanent_check": True' in src or "'permanent_check': True" in src
       or '"permanent_check"' in src,
