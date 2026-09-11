@@ -174,6 +174,7 @@ DEFAULTS = {
         "_adaptive_flood_extra": 0,             # اضافه فعلی از Flood
         "_adaptive_last_flood": 0,              # آخرین زمان Flood
         "_adaptive_last_decay": 0,              # آخرین چک کاهش
+        "_adaptive_hard_until": 0,              # 🧯 تا این لحظه فاصله برگشت نمی‌خورد (فلود بزرگ)
     },
 
     # ── محافظ ریپورت ───────────────────────────────────
@@ -1948,6 +1949,17 @@ class Engine:
         max_extra = max(step, int(x.get("adaptive_flood_max_sec", 120) or 120))
         cur = max(0, int(x.get("_adaptive_flood_extra", 0) or 0))
         new = min(max_extra, cur + step)
+        # 🧯 مدار قطع‌کن: فلود بزرگ (≥۱۰ دقیقه) یعنی سقف «تعداد جوین روزانه»
+        # تلگرام فعال شده — نه فاصله‌ی کوتاه. اضافه مستقیم به سقف می‌رود و
+        # تا پایان جریمه اجازه‌ی برگشت ندارد تا جریمه‌ی بعدی طولانی‌تر نشود.
+        try:
+            _w = int(flood_seconds or 0)
+        except Exception:
+            _w = 0
+        if _w >= 600:
+            new = max_extra
+            x["_adaptive_flood_extra"] = new
+            x["_adaptive_hard_until"] = int(now + min(_w, 6 * 3600))
         x["_adaptive_flood_extra"] = new
         x["_adaptive_last_flood"] = now
         x["_adaptive_last_decay"] = now
@@ -1967,6 +1979,8 @@ class Engine:
         if not x.get("adaptive_on", True):
             return
         now = now or int(time.time())
+        if now < int(x.get("_adaptive_hard_until", 0) or 0):
+            return  # 🧯 حالت احتیاط: فاصله تا پایان جریمه برگشت نمی‌خورد
         cur = int(x.get("_adaptive_flood_extra", 0) or 0)
         if cur <= 0:
             return
@@ -2019,6 +2033,8 @@ class Engine:
             f"  • اضافه از FloodWait: {fa(f_extra)} ثانیه",
             f"  • اضافه از آپ‌تایم ({fa(uptime//3600)}ساعت روشن): {fa(u_extra)} ثانیه",
             f"  • جمع اضافه: {fa(total)} ثانیه",
+            *([f"🧯 حالت احتیاط: {secs(int(x.get('_adaptive_hard_until', 0) or 0) - int(time.time()))} دیگر — برگشت فاصله متوقف است"]
+              if int(x.get("_adaptive_hard_until", 0) or 0) > int(time.time()) else []),
             "",
             f"⚙️ هر FloodWait: +{fa(flood_step)} ثانیه (سقف {fa(flood_max)} ثانیه)",
             f"♻️ کاهش خودکار: هر {fa(decay)} دقیقه بدون Flood، {fa(flood_step)} ثانیه کم می‌شود",
@@ -4922,6 +4938,12 @@ async def connect_and_run(eng, creds):
                 eng.adaptive_on_flood(w)
             except Exception:
                 pass
+            if w >= 300:
+                # حساب در جریمه است؛ چک‌های عضویت بار اضافه‌اند — گیت چک هم آرام بگیرد
+                try:
+                    check_gate.penalize(min(w, 1800))
+                except Exception:
+                    pass
             return False, f"FloodWait {w}s", ""
         except Exception as e:
             return False, f"{type(e).__name__}: {e}", ""
@@ -4941,6 +4963,11 @@ async def connect_and_run(eng, creds):
                 eng.adaptive_on_flood(w)
             except Exception:
                 pass
+            if w >= 300:
+                try:
+                    check_gate.penalize(min(w, 1800))
+                except Exception:
+                    pass
             return False, f"FloodWait {w}s"
         except Exception as e:
             return False, f"{type(e).__name__}: {e}"
@@ -5958,7 +5985,23 @@ async def connect_and_run(eng, creds):
                         else:
                             if msg.startswith("FloodWait"):
                                 eng.db.ex_set(rec["id"], note=msg)
-                                await note(f"⏳ تبادل — {msg}\nصبر می‌کنم و ادامه می‌دهم.")
+                                try:
+                                    _fw = int(re.search(r"FloodWait (\d+)s", msg).group(1))
+                                except Exception:
+                                    _fw = 0
+                                if _fw >= 600:
+                                    # جریمه‌ی سقف روزانه است — صادقانه توضیح بده
+                                    _today = eng.db.ex_joins_today()
+                                    await note(
+                                        "🧯 **FloodWait " + secs(_fw) + "** — این جریمه‌ی "
+                                        "**سقف تعداد جوین روزانه** است، نه فاصله‌ی کوتاه؛ "
+                                        "تلگرام (مخصوصاً لینک خصوصی t.me/+…) جوینِ زیادِ "
+                                        "یک‌روزه را ساعت‌ها می‌بندد.\n"
+                                        f"امروز {fa(_today)} جوین زدم. تا پایان جریمه صبر "
+                                        "می‌کنم و بعد با حداکثر فاصله ادامه می‌دهم.\n"
+                                        "برای ریسک کمتر: «تبادل فاصله ۹۰ ۱۸۰» یا جوین کمتر در روز.")
+                                else:
+                                    await note(f"⏳ تبادل — {msg}\nصبر می‌کنم و ادامه می‌دهم.")
                             elif msg.startswith("درخواست عضویت"):
                                 # درخواست عضویت با تأیید مدیر تمام نشده؛ شکست قطعی نیست.
                                 eng.db.ex_set(rec["id"], status="pending", note=msg)
