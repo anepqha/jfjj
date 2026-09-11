@@ -376,6 +376,127 @@ check(r2["link"] not in stub2.left,
 print("DONE F7 flood-cooldown patience")
 
 
+# ═══ F8 — سقف مادام‌العمر «نیومدی»: فقط ۲ بار برای هر تبادل، نه تا ابد ═══
+import sqlite3 as _sq
+old_db_path = "legacy_exchange.db"
+if os.path.exists(old_db_path):
+    os.remove(old_db_path)
+_c = _sq.connect(old_db_path)
+OLD_SCHEMA = (
+    "CREATE TABLE exchange ( "
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+    "peer_id INTEGER, peer_name TEXT, link TEXT NOT NULL UNIQUE, "
+    "channel_title TEXT, status TEXT NOT NULL DEFAULT 'pending', "
+    "strikes INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, "
+    "joined_at INTEGER, last_check INTEGER NOT NULL DEFAULT 0, note TEXT, "
+    "src_chat INTEGER, src_msg INTEGER, "
+    "replied INTEGER NOT NULL DEFAULT 0, direction TEXT NOT NULL DEFAULT 'in', "
+    "reminders INTEGER NOT NULL DEFAULT 0, "
+    "next_reminder INTEGER NOT NULL DEFAULT 0, "
+    "next_check INTEGER NOT NULL DEFAULT 0)")
+_c.execute(OLD_SCHEMA)
+_c.execute("INSERT INTO exchange (peer_id, link, created_at) VALUES (1, '@old', 0)")
+_c.commit()
+_c.close()
+eng_mig = m.DB(old_db_path)
+cols = {r[1] for r in eng_mig.conn.execute("PRAGMA table_info(exchange)")}
+check("reminders_total" in cols,
+      "F8: \u0633\u062a\u0648\u0646 reminders_total \u0631\u0648\u06cc \u062f\u06cc\u062a\u0627\u0628\u06cc\u0633 \u0642\u062f\u06cc\u0645\u06cc \u0645\u0647\u0627\u062c\u0631\u062a \u0634\u062f")
+row = eng_mig._x("SELECT * FROM exchange WHERE link='@old'", (), "one")
+check(row["reminders_total"] == 0, "F8: \u0631\u06a9\u0648\u0631\u062f \u0642\u062f\u06cc\u0645\u06cc \u0628\u0627 \u0645\u0642\u062f\u0627\u0631 \u0670")
+
+check("ex_reminder_cap" in src,
+      "F8: \u0633\u0642\u0641 \u0645\u0637\u0644\u0642 \u062f\u0627\u062e\u0644 send_not_joined_reminder (\u062a\u0646\u0647\u0627 \u0646\u0642\u0637\u0647 \u0627\u0631\u0633\u0627\u0644)")
+check('if int(rec.get("reminders_total") or 0) >= _max_rem:' in src,
+      "F8: \u0634\u0631\u0637 \u0633\u0642\u0641 \u0645\u0648\u062c\u0648\u062f \u0627\u0633\u062a")
+check(src.count("reminders_total=0") >= 3,
+      "F8: \u0631\u06cc\u0633\u062a \u0641\u0642\u0637 \u062f\u0631 \u0646\u0642\u0627\u0637 \u0639\u0636\u0648\u06cc\u062a \u0648\u0627\u0642\u0639\u06cc (\u06f3 \u0646\u0642\u0637\u0647)")
+check("can_more and not active_window" in src,
+      "F8: \u0627\u0631\u0633\u0627\u0644 \u0641\u0648\u0631\u06cc \u0627\u062f\u0639\u0627 \u0647\u0645 \u062a\u0627\u0628\u0639 \u0633\u0642\u0641 \u0645\u0627\u062f\u0627\u0645\u200c\u0627\u0644\u0639\u0645\u0631 \u0627\u0633\u062a")
+check("reminders_total=total_sent + (1 if sent_now else 0)" in src,
+      "F8: \u0645\u0633\u06cc\u0631 \u0627\u062f\u0639\u0627 \u0634\u0645\u0627\u0631\u0646\u062f\u0647 \u0631\u0627 \u0628\u0627\u0644\u0627 \u0645\u06cc\u200c\u0628\u0631\u062f")
+
+# تابع واقعی ارسال «نیومدی» را از سورس استخراج کن (سقف مادام‌العمر داخلش است)
+a_r = src.find("async def send_not_joined_reminder")
+b_r = src.find("# ---------- پیدا کردن کانال طرف", a_r)
+assert a_r > 0 and b_r > a_r, "send_not_joined_reminder markers missing"
+blk = src[a_r:b_r]
+blines = blk.splitlines()
+blines = blines[1:]   # فقط خط امضا حذف شود؛ بدنه (حتی داک‌استرینگ) بماند
+while blines and not blines[-1].strip():
+    blines.pop()
+ded_r = "\n".join(ln[8:] if ln.startswith(" " * 8) else ln for ln in blines)
+
+
+class FakeClientCap:
+    def __init__(self):
+        self.sent = []
+
+    async def send_message(self, chat, body, reply_to=None, **kw):
+        self.sent.append((chat, body, reply_to))
+        return object()
+
+
+def make_real_sender(eng, client):
+    ns = {"eng": eng, "client": client, "DRY_RUN": False,
+          "asyncio": asyncio, "DEFAULT_MSG_NO": m.DEFAULT_MSG_NO}
+    exec("async def send_not_joined_reminder(rec):\n"
+         + "\n".join("    " + ln for ln in ded_r.splitlines()) + "\n", ns)
+    return ns["send_not_joined_reminder"]
+
+
+# رفتاری با تابع واقعی:
+eng_real = fresh_engine()
+eng_real.st.prof("standard")["channel"] = "@my_real_chan"
+client_cap = FakeClientCap()
+real_send = make_real_sender(eng_real, client_cap)
+r_cap, _ = eng_real.db.ex_add(810, "capreal", "@cap810")
+eng_real.db.ex_set(r_cap["id"], src_chat=111, src_msg=222, reminders_total=2)
+got = asyncio.run(real_send(eng_real.db.ex_get(r_cap["id"])))
+check(got is False and len(client_cap.sent) == 0,
+      "F8-رفتاری: total=۲ → تابع واقعی ارسال نمی‌کند")
+eng_real.db.ex_set(r_cap["id"], reminders_total=1)
+got = asyncio.run(real_send(eng_real.db.ex_get(r_cap["id"])))
+check(got is True and len(client_cap.sent) == 1,
+      "F8-رفتاری: total=۱ → ارسال می‌شود (بار دوم مجاز)")
+
+# دو دور متوالی بدون عضویت → چرخهٔ تازه هیچ پیام تازه‌ای نمی‌سازد
+eng_tot = fresh_engine()
+real_send_tot = make_real_sender(eng_tot, FakeClientCap())
+rt, _ = eng_tot.db.ex_add(801, "cap", "@cap801")
+eng_tot.db.ex_set(rt["id"], reminders=2, reminders_total=2,
+                  status="left", note="\u0646\u06cc\u0648\u0645\u062f \u2190 \u0644\u0641\u062a \u062f\u0627\u062f\u0645")
+eng_tot.db.ex_set(rt["id"], status="pending", reminders=0,
+                  next_reminder=int(time.time()) - 5)
+stub_cap = Stub(member_map={801: False})
+stub_cap.send_rem = real_send_tot        # تابع واقعی با سقف مادام‌العمر
+asyncio.run(run_reminder(eng_tot, eng_tot.ex_cfg(), stub_cap))
+g_cap = eng_tot.db.ex_get(rt["id"])
+check(len(stub_cap.sent) == 0,
+      "F8: \u0686\u0631\u062e\u0647 \u062a\u0627\u0632\u0647 \u0628\u062f\u0648\u0646 \u0639\u0636\u0648\u06cc\u062a \u2190 \u0647\u06cc\u0686 \u00ab\u0646\u06cc\u0648\u0645\u062f\u06cc\u00bb \u062a\u0627\u0632\u0647 \u0646\u0645\u06cc\u200c\u0631\u0648\u062f")
+check(int(g_cap["strikes"] or 0) >= 1,
+      "F8: \u062a\u0644\u0627\u0634\u200c\u0647\u0627\u06cc \u0633\u0627\u06a9\u062a \u0634\u0645\u0631\u062f\u0647 \u0645\u06cc\u200c\u0634\u0648\u062f")
+for _ in range(3):
+    eng_tot.db.ex_set(rt["id"], next_reminder=int(time.time()) - 5)
+    asyncio.run(run_reminder(eng_tot, eng_tot.ex_cfg(), stub_cap))
+g_cap = eng_tot.db.ex_get(rt["id"])
+check(g_cap["status"] == "failed" and len(stub_cap.sent) == 0,
+      "F8: \u0628\u0639\u062f \u0627\u0632 \u06f3 \u062a\u0644\u0627\u0634 \u0633\u0627\u06a9\u062a \u2190 \u062a\u0628\u0627\u062f\u0644 \u0628\u062f\u0648\u0646 \u067e\u06cc\u0627\u0645 \u0628\u0633\u062a\u0647 \u0634\u062f")
+
+check(int(g_cap["reminders_total"] or 0) == 2,
+      "F8: شمارندهٔ مادام‌العمر روی ۲ ماند — پیام سوم ساخته نشد")
+
+# عضویت واقعی شمارنده را صفر می‌کند
+eng_tot.db.ex_set(rt["id"], status="joined", reminders_total=2)
+eng_tot.db.ex_set(rt["id"], next_reminder=int(time.time()) - 5)
+stub_mem = Stub(member_map={801: True})
+asyncio.run(run_reminder(eng_tot, eng_tot.ex_cfg(), stub_mem))
+g_mem = eng_tot.db.ex_get(rt["id"])
+check(g_mem["reminders_total"] == 0,
+      "F8: \u0639\u0636\u0648 \u0634\u062f \u2190 \u0634\u0645\u0627\u0631\u0646\u062f\u0647 \u0635\u0641\u0631 \u0634\u062f (\u062f\u0648\u0631 \u0628\u0639\u062f\u06cc \u062d\u0642 \u067e\u06cc\u0627\u0645 \u062f\u0627\u0631\u062f)")
+print("DONE F8 lifetime cap")
+
+
 if FAILS:
     print("FAILED:", len(FAILS))
     for f in FAILS:

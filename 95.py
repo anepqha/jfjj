@@ -424,7 +424,8 @@ CREATE TABLE IF NOT EXISTS exchange (
     direction TEXT NOT NULL DEFAULT 'in',
     reminders INTEGER NOT NULL DEFAULT 0,
     next_reminder INTEGER NOT NULL DEFAULT 0,
-    next_check INTEGER NOT NULL DEFAULT 0
+    next_check INTEGER NOT NULL DEFAULT 0,
+    reminders_total INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_ex ON exchange(status, last_check);
 CREATE TABLE IF NOT EXISTS events (
@@ -451,7 +452,8 @@ class DB:
                               ("direction", "TEXT NOT NULL DEFAULT 'in'"),
                               ("reminders", "INTEGER NOT NULL DEFAULT 0"),
                               ("next_reminder", "INTEGER NOT NULL DEFAULT 0"),
-                              ("next_check", "INTEGER NOT NULL DEFAULT 0")):
+                              ("next_check", "INTEGER NOT NULL DEFAULT 0"),
+                              ("reminders_total", "INTEGER NOT NULL DEFAULT 0")):
                 if col not in have:
                     self.conn.execute(f"ALTER TABLE exchange ADD COLUMN {col} {decl}")
             # بعد از مهاجرت ساخته شود؛ وگرنه دیتابیس قدیمی هنوز ستون next_check ندارد.
@@ -5094,6 +5096,17 @@ async def connect_and_run(eng, creds):
         x = eng.ex_cfg()
         if not x["reply"] or not rec:
             return False
+        # سقف مطلق (فیکس «تا ابد میگه»): برای هر تبادل فقط max_rem بار
+        # «نیومدی» می‌رود — شمارندهٔ مادام‌العمر (reminders_total) فقط با
+        # عضویتِ واقعیِ طرف صفر می‌شود؛ چرخه‌های جدید (ادعای دوباره،
+        # ری‌استارت بعد از لفت و…) حق پیام تازه نمی‌سازند.
+        _max_rem = max(0, min(3, int(x.get("max_reminders", 2) or 0)))
+        if _max_rem == 0:
+            return False
+        if int(rec.get("reminders_total") or 0) >= _max_rem:
+            eng.log("info", "ex_reminder_cap",
+                    f"#{rec['id']} total={rec.get('reminders_total')} >= {_max_rem}")
+            return False
         # لینک طرف فقط برای placeholder {channel} اگر کاربر خودش خواسته باشد
         # استفاده می‌شود؛ اما auto-append لینک طرف هرگز انجام نمی‌شود.
         link = (rec.get("link") or "").strip()
@@ -5327,6 +5340,9 @@ async def connect_and_run(eng, creds):
             send_now = False
             now0 = int(time.time())
             old_count = max(0, int(rec.get("reminders") or 0))
+            # سقف مادام‌العمر: کل «نیومدی»های قبلی این رکورد (هر چرخه‌ای)
+            total_sent = max(0, int(rec.get("reminders_total") or 0))
+            can_more = total_sent < max_rem
             # اگر همین حالا نوبتِ یادآوری/لفتِ این طرف فعال است، پیامِ
             # تازه‌ای پشت سر همان نمی‌رود؛ همان زمان‌بندی کار خودش را
             # می‌کند تا دو پیام «نیومدی» پشت سر هم نیفتند.
@@ -5334,7 +5350,7 @@ async def connect_and_run(eng, creds):
             if rec["status"] == "joined":
                 # رکورد پیش‌قدم را خراب نکن؛ دو یادآوری فاصله‌دار می‌رود
                 # و اگر طرف تا آن موقع نیامد، از کانالش لفت می‌دهم.
-                if not active_window and old_count < max_rem and x["reply"]:
+                if can_more and not active_window and old_count < max_rem and x["reply"]:
                     send_now = True
                 eng.db.ex_set(rec["id"],
                               src_chat=event.chat_id, src_msg=event.id,
@@ -5344,7 +5360,7 @@ async def connect_and_run(eng, creds):
                 fresh = rec["status"] in ("left", "failed")
                 if fresh:
                     old_count = 0
-                if not active_window and old_count < max_rem and x["reply"]:
+                if can_more and not active_window and old_count < max_rem and x["reply"]:
                     send_now = True
                 eng.db.ex_set(rec["id"], status="pending",
                               strikes=0 if fresh else rec["strikes"] + 1,
@@ -5373,6 +5389,7 @@ async def connect_and_run(eng, creds):
                 if sent_now or (not joined_rec
                                 and not int(rec_now.get("next_reminder") or 0)):
                     eng.db.ex_set(rec["id"], reminders=new_count,
+                                  reminders_total=total_sent + (1 if sent_now else 0),
                                   next_reminder=int(time.time()) + reminder_delay())
             return
 
@@ -5451,7 +5468,8 @@ async def connect_and_run(eng, creds):
             return
 
         eng.db.ex_set(rec["id"], src_chat=event.chat_id, src_msg=event.id,
-                      replied=0, peer_id=sender.id, peer_name=sender_name)
+                      replied=0, peer_id=sender.id, peer_name=sender_name,
+                      reminders_total=0)   # عضو واقعی بود — سابقه «نیومدی» پاک شود
 
         if x["auto_join"]:
             eng.db.ex_set(rec["id"], status="approved", strikes=0,
@@ -5686,7 +5704,8 @@ async def connect_and_run(eng, creds):
                         eng.db.ex_set(rec["id"],
                                       status="approved" if rec["status"] == "pending"
                                       else rec["status"],
-                                      reminders=0, next_reminder=0,
+                                      reminders=0, reminders_total=0,
+                                      next_reminder=0,
                                       strikes=0, replied=0,
                                       note="عضو شد — آماده Join")
                     elif still is False:
@@ -5803,7 +5822,8 @@ async def connect_and_run(eng, creds):
                     if still is True:
                         eng.db.ex_set(rec["id"], last_check=now,
                                       next_check=now + membership_check_delay(),
-                                      strikes=0, note="عضو است")
+                                      strikes=0, reminders_total=0,
+                                      note="عضو است")
                     elif still is False:
                         st = rec["strikes"] + 1
                         # فیکس: طرفی که از اول هیچ‌وقت نیامده (بدون ادعای
@@ -5822,6 +5842,8 @@ async def connect_and_run(eng, creds):
                                           strikes=1, last_check=nowf,
                                           next_check=0,
                                           reminders=1 if sent0 else 0,
+                                          reminders_total=(int(rec.get("reminders_total") or 0)
+                                                           + (1 if sent0 else 0)),
                                           next_reminder=nowf + reminder_delay(),
                                           note="نیومد — دور «نیومدی» شروع شد (چک دائمی)")
                             eng.log("info", "ex_first_miss",
