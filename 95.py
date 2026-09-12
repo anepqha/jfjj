@@ -201,6 +201,22 @@ DEFAULTS = {
         "_last_off": 0,          # زمان آخرین خاموشی خودکار
         "_last_alert": 0,        # زمان آخرین هشدار (ضد اسپم نوتیف)
     },
+
+    # ── دروازه‌ی عملکرد سراسری (OpGate) ───────────────
+    #  CheckGate فقط «بررسی عضویت» را پخش می‌کند؛ ولی سلف هم‌زمان جوین/لفت،
+    #  رزولِ یوزرنیم، ارسال پیام و اسکن گروه هم می‌زند. این بخش بودجه‌ی
+    #  «فشارِ کل» روی API تلگرام را در یک پنجره‌ی غلتان ۶۰ ثانیه‌ای تعیین
+    #  می‌کند تا مسیرهای نوشتنی (جوین/ارسال) پشت‌سرهم فلود نخورند.
+    "opgate": {
+        "on": True,                  # پیش‌فرض روشن (با «تبادل دروازه خاموش» خاموش می‌شود)
+        "budget_per_min": 40,        # چند «واحد فشار» در پنجره مجاز است
+        "min_gap_sec": 0.4,          # حداقل فاصله‌ی سراسری بین دو عملیات API
+        "window_sec": 60,            # طول پنجره‌ی غلتان
+        "quiet_floods": 3,           # چند FloodWait در بازه‌ی زیر → حالت سکوت
+        "quiet_window_min": 10,      # بازه‌ی شمارش فلودها (دقیقه)
+        "quiet_minutes": 15,         # طول حالت سکوت (دقیقه)
+        "decay_min": 10,             # هر چند دقیقه بی‌فلودی، یک پله بودجه برگردد
+    },
 }
 
 SESSION = "jafj"
@@ -809,6 +825,274 @@ class CheckGate:
         return now < self.cooldown_until
 
 
+# ─────────────────────────────────────────────
+#  دروازه‌ی عملکرد سراسری (OpGate)
+# ─────────────────────────────────────────────
+class OpGate:
+    """دروازه‌ی عملکرد — بودجه‌ی «فشارِ کل» روی API تلگرام.
+
+    چرا لازم بود: CheckGate فقط مسیر «بررسی عضویت» را پخش می‌کند، اما سلف
+    هم‌زمان کارهای دیگری هم با API تلگرام می‌کند: جوین، لفت، رزولِ یوزرنیم،
+    ارسال پیام، اسکن تاریخچه‌ی گروه‌ها. هیچ‌کدام از این مسیرها از هم خبر
+    نداشتند، پس فشارِ *کل* روی حساب هیچ‌جا اندازه‌گیری نمی‌شد؛ نتیجه‌اش
+    FloodWait روی مسیرهای نوشتنی (جوین/ارسال) بود — دقیقاً وقتی که چک‌ها
+    آرام گرفته بودند و کاربر فکر می‌کرد ربات دارد درست کار می‌کند.
+
+    این دروازه همه‌ی عملیات را با «واحدِ فشار» در یک پنجره‌ی غلتان حساب می‌کند:
+      • هر عملیات وزن دارد (جوین ۳، لفت/چک/رزول ۲، ارسال/اسکن/نوت ۱)
+      • از بودجه‌ی پنجره که رد شد، صدازننده تا خالی‌شدن پنجره صبر می‌کند
+      • حداقل فاصله‌ی سراسری بین دو عملیات → هیچ انفجاری ساخته نمی‌شود
+      • FloodWait → سقف سراسری تا پایان جریمه + کم‌شدن بودجه (با سقف)
+      • چند فلود در یک بازه‌ی کوتاه → «حالت سکوت»: تا پایانش `wait` عدد
+        بزرگ برمی‌گرداند تا مسیرهای غیرضروری بی‌خیالِ درخواست شوند
+      • بعد از مدت بی‌فلودی، بودجه پله‌پله برمی‌گردد
+
+    مثل CheckGate همه‌ی متدها `now` اختیاری می‌گیرند تا قطعی و قابل تست باشند.
+    """
+
+    # وزنِ هر دسته عملیات (واحد فشار)
+    COSTS = {"join": 3.0, "leave": 2.0, "check": 2.0, "resolve": 2.0,
+             "send": 1.0, "scan": 1.0, "note": 1.0, "other": 1.0}
+
+    def __init__(self, cfg=None):
+        self.on = True
+        self.base_budget = 40.0
+        self.min_gap = 0.4
+        self.window = 60.0
+        self.quiet_floods = 3
+        self.quiet_window = 600.0
+        self.quiet_for = 900.0
+        self.decay_sec = 600.0
+        self.max_penalty = max(2.0, self.base_budget * 0.6)
+        self.penalty = 0.0
+        if cfg:
+            self.apply(cfg)
+        self.hits = []              # (ts, cost, kind) — فشارِ داخل پنجره
+        self.floods = []            # ts فلودهای اخیر
+        self.cooldown_until = 0.0   # سقفِ خودِ FloodWait
+        self.quiet_until = 0.0      # پایان حالت سکوت
+        self.last = 0.0             # زمان آخرین عملیات (برای حداقل فاصله)
+        self.last_flood = 0.0
+        self.last_decay = 0.0
+        self.last_kind = ""
+        self.last_flood_kind = ""
+        self.last_quiet_reason = ""
+        self.total_ops = 0
+        self.total_cost = 0.0
+        self.total_floods = 0
+        self.quiet_rounds = 0
+
+    # ── پیکربندی ──────────────────────────────────────
+    def apply(self, cfg):
+        """تنظیم‌ها را می‌خواند؛ شمارنده‌های زنده (فشار/فلود) دست نمی‌خورند."""
+        c = cfg or {}
+        self.on = bool(c.get("on", True))
+        self.base_budget = max(1.0, float(c.get("budget_per_min", 40) or 40))
+        self.min_gap = max(0.0, float(c.get("min_gap_sec", 0.4) or 0.0))
+        self.window = max(1.0, float(c.get("window_sec", 60) or 60))
+        self.quiet_floods = max(1, int(c.get("quiet_floods", 3) or 3))
+        self.quiet_window = max(1.0, 60.0 * float(c.get("quiet_window_min", 10) or 10))
+        self.quiet_for = max(1.0, 60.0 * float(c.get("quiet_minutes", 15) or 15))
+        self.decay_sec = max(1.0, 60.0 * float(c.get("decay_min", 10) or 10))
+        self.max_penalty = max(2.0, self.base_budget * 0.6)
+        self.penalty = min(self.penalty, self.max_penalty)
+
+    # ── محاسبه‌ها ─────────────────────────────────────
+    def cost(self, kind):
+        return float(self.COSTS.get(kind or "other", 1.0))
+
+    def budget(self):
+        """بودجه‌ی مؤثر پنجره (پایه − جریمه‌ی فلود).
+
+        کف ۱ واحد: بودجه هیچ‌وقت صفر نمی‌شود تا دروازه قفلِ دائمی نسازد؛
+        عملیاتِ گران‌تر از کل بودجه هم در `wait` استثنا شده است.
+        """
+        return max(1.0, self.base_budget - self.penalty)
+
+    def _trim(self, now):
+        cut = now - self.window
+        if self.hits and self.hits[0][0] <= cut:
+            self.hits = [h for h in self.hits if h[0] > cut]
+
+    def load(self, now=None):
+        """مجموع واحدِ فشارِ داخل پنجره‌ی فعلی."""
+        now = now if now is not None else time.time()
+        self._trim(now)
+        return sum(h[1] for h in self.hits)
+
+    def hard_until(self, now=None):
+        now = now if now is not None else time.time()
+        return max(self.cooldown_until, self.quiet_until)
+
+    def blocked(self, now=None):
+        """سقف فلود یا حالت سکوت فعال است؟"""
+        now = now if now is not None else time.time()
+        return now < self.hard_until(now)
+
+    def wait(self, kind="other", now=None):
+        """چند ثانیه صبر لازم است تا این عملیات رد شود (۰ = همین حالا).
+
+        سه چیز را با هم در نظر می‌گیرد: سقفِ فلود/سکوت، حداقل فاصله‌ی
+        سراسری، و پر بودن بودجه‌ی پنجره. هیچ حالت تغییری نمی‌دهد (فقط
+        `record` حساب می‌کند) تا صدازدنِ مکررِ `wait` چیزی را خراب نکند.
+        """
+        now = now if now is not None else time.time()
+        if not self.on:
+            return 0.0
+        hard = self.hard_until(now)
+        if now < hard:
+            return hard - now
+        w = max(0.0, (self.last + self.min_gap) - now) if self.last else 0.0
+        need = self.cost(kind)
+        cap = self.budget()
+        if need > cap:
+            # عملیات از کل بودجه گران‌تر است — هرگز نباید قفل دائمی شود
+            return w
+        self._trim(now)
+        over = sum(h[1] for h in self.hits) + need - cap
+        for ts, c, _k in sorted(self.hits):
+            if over <= 0:
+                break
+            # لحظه‌ای که این عملیاتِ قدیمی از پنجره بیرون می‌رود
+            w = max(w, (ts + self.window) - now)
+            over -= c
+        return max(0.0, w)
+
+    def record(self, kind="other", cost=None, now=None):
+        """یک عملیاتِ واقعی زده شد → فشارش را در پنجره ثبت کن."""
+        now = now if now is not None else time.time()
+        c = self.cost(kind) if cost is None else max(0.0, float(cost))
+        self.hits.append((now, c, kind))
+        self.last = max(self.last, now)
+        self.last_kind = kind or "other"
+        self.total_ops += 1
+        self.total_cost += c
+        self._trim(now)
+        return c
+
+    def penalize(self, sec, kind="other", now=None):
+        """FloodWait خورد → سقف سراسری + بودجه‌ی کمتر + شاید حالت سکوت.
+
+        برمی‌گرداند True اگر این فلود دروازه را به حالت سکوت برده باشد.
+        """
+        now = now if now is not None else time.time()
+        w = max(0.0, float(sec))
+        self.cooldown_until = max(self.cooldown_until, now + w + 2.0)
+        step = max(2.0, self.base_budget * 0.15)
+        self.penalty = min(self.max_penalty, self.penalty + step)
+        self.last_flood = now
+        self.last_decay = now
+        self.last_flood_kind = kind or "other"
+        self.total_floods += 1
+        self.floods = [t for t in self.floods if t > now - self.quiet_window]
+        self.floods.append(now)
+        if len(self.floods) >= self.quiet_floods and self.quiet_until <= now:
+            self.quiet_until = now + self.quiet_for
+            self.quiet_rounds += 1
+            self.last_quiet_reason = (f"{fa(len(self.floods))} فلود در "
+                                      f"{fa(int(self.quiet_window // 60))} دقیقه")
+            return True
+        return False
+
+    def maybe_decay(self, now=None):
+        """هر `decay_sec` بی‌فلودی، یک پله از جریمه‌ی بودجه کم کن."""
+        now = now if now is not None else time.time()
+        if self.penalty <= 0:
+            return False
+        if self.last_flood and now - self.last_flood < self.decay_sec:
+            return False
+        ref = self.last_decay or self.last_flood
+        if ref and now - ref < self.decay_sec:
+            return False
+        self.penalty = max(0.0, self.penalty - max(2.0, self.base_budget * 0.1))
+        self.last_decay = now
+        return True
+
+    def release_quiet(self):
+        """خروج دستی از حالت سکوت (دستور پنل) — جریمه‌ی بودجه می‌ماند."""
+        self.quiet_until = 0.0
+        self.floods = []
+        return True
+
+    def reset(self):
+        """صفر کردن جریمه/سکوت/سقف — فشارِ پنجره دست‌نخورده می‌ماند."""
+        self.penalty = 0.0
+        self.cooldown_until = 0.0
+        self.quiet_until = 0.0
+        self.floods = []
+        self.last_flood = 0.0
+        self.last_decay = 0.0
+        return True
+
+    # ── گزارش ─────────────────────────────────────────
+    def stats(self, now=None):
+        now = now if now is not None else time.time()
+        self._trim(now)
+        hard = self.hard_until(now)
+        return {
+            "on": self.on,
+            "budget": round(self.budget(), 1),
+            "budget_base": round(self.base_budget, 1),
+            "penalty": round(self.penalty, 1),
+            "load": round(sum(h[1] for h in self.hits), 1),
+            "ops_in_window": len(self.hits),
+            "window_sec": self.window,
+            "min_gap_sec": self.min_gap,
+            "floods_recent": len([t for t in self.floods
+                                  if t > now - self.quiet_window]),
+            "floods_total": self.total_floods,
+            "quiet": bool(now < self.quiet_until),
+            "quiet_left": int(max(0.0, self.quiet_until - now)),
+            "quiet_rounds": self.quiet_rounds,
+            "quiet_reason": self.last_quiet_reason,
+            "cooldown_left": int(max(0.0, self.cooldown_until - now)),
+            "blocked": bool(now < hard),
+            "blocked_left": int(max(0.0, hard - now)),
+            "total_ops": self.total_ops,
+            "total_cost": round(self.total_cost, 1),
+            "last_flood_kind": self.last_flood_kind,
+        }
+
+    def status_text(self, now=None):
+        s = self.stats(now)
+        lines = ["⚙️ دروازه‌ی عملکرد (OpGate)", "━━━━━━━━━━━━━━"]
+        if not s["on"]:
+            lines += ["وضعیت: خاموش — فشار API اندازه‌گیری نمی‌شود",
+                      "روشن کردن: `تبادل دروازه روشن`"]
+            return "\n".join(lines)
+        pct = int(round(100 * s["load"] / s["budget"])) if s["budget"] else 0
+        filled = min(10, max(0, pct // 10))
+        bar = "█" * filled + "░" * (10 - filled)
+        lines += [
+            "وضعیت: روشن",
+            (f"فشارِ {fa(int(s['window_sec']))} ثانیه‌ی اخیر: {bar} "
+             f"{fa(int(s['load']))} از {fa(int(s['budget']))} واحد ({fa(pct)}٪)"),
+            f"عملیات در پنجره: {fa(s['ops_in_window'])} عدد",
+            f"حداقل فاصله‌ی سراسری: {s['min_gap_sec']:g} ثانیه",
+            (f"جریمه‌ی بودجه: −{fa(int(s['penalty']))} واحد "
+             f"(پایه {fa(int(s['budget_base']))})"),
+            (f"فلودِ {fa(int(self.quiet_window // 60))} دقیقه‌ی اخیر: "
+             f"{fa(s['floods_recent'])} از {fa(self.quiet_floods)} لازم برای سکوت"),
+            (f"فلود از شروع: {fa(s['floods_total'])} | "
+             f"سکوت‌ها: {fa(s['quiet_rounds'])}"),
+        ]
+        if s["quiet"]:
+            lines.append(f"🤫 حالت سکوت: {secs(s['quiet_left'])} مانده — "
+                         "عملیات غیرضروری زده نمی‌شود")
+        elif s["cooldown_left"]:
+            lines.append(f"⏳ سقف فلود: {secs(s['cooldown_left'])} مانده")
+        else:
+            lines.append("🟢 نه سقف فلود فعال است، نه سکوت")
+        lines += [
+            f"مجموع از شروع: {fa(s['total_ops'])} عملیات / "
+            f"{fa(int(s['total_cost']))} واحد",
+            "",
+            "`تبادل دروازه خاموش` / `تبادل دروازه روشن` · "
+            "`تبادل دروازه بودجه 60` · `تبادل دروازه ریست`",
+        ]
+        return "\n".join(lines)
+
+
 class Throttle:
     def __init__(self, p):
         self.apply(p)
@@ -1311,6 +1595,15 @@ HELP = """🤖 راهنمای جفج
 تبادل تطبیقی uptime 3 — بعد از چند ساعت کند شود (پیش‌فرض ۳ ساعت)
 تبادل تطبیقی extra 30 10 — اضافه آپ‌تایم (۳۰ ثانیه بعد آستانه + ۱۰ ثانیه هر ساعت)
 
+⚙️ دروازه‌ی عملکرد (OpGate)
+بودجه‌ی «فشارِ کل» روی API تلگرام: جوین/لفت/چک/ارسال/اسکن همه با واحدِ فشار
+در یک پنجره‌ی ۶۰ ثانیه‌ای حساب می‌شوند تا مسیرهای نوشتنی پشت‌سرهم فلود نخورند.
+تبادل دروازه — وضعیت (فشار پنجره، جریمه، فلودها، حالت سکوت)
+تبادل دروازه خاموش / تبادل دروازه روشن — غیرفعال/فعال کردن دروازه (پیش‌فرض روشن)
+تبادل دروازه بودجه 60 — چند واحد فشار در دقیقه مجاز باشد (پیش‌فرض ۴۰)
+تبادل دروازه فاصله 0.8 — حداقل فاصله‌ی سراسری بین دو عملیات (پیش‌فرض ۰.۴ ثانیه)
+تبادل دروازه ریست — صفر کردن جریمه/سقف فلود/سکوت
+
 📊 گزارش خصوصی تبادل
 تبادل گزارش — ورود به منوی گزارش تبادل
 تنظیم گزارش روشن — فعال‌کردن گزارش لحظه‌ای در PV
@@ -1383,6 +1676,8 @@ class Engine:
         self.join_thr = Throttle({"min_gap_sec": x["min_join_gap_sec"],
                                   "max_gap_sec": x["max_join_gap_sec"],
                                   "max_per_hour": 0})
+        # دروازه‌ی عملکرد سراسری: بودجه‌ی فشار API برای همه‌ی مسیرها
+        self.op_gate = OpGate(self.st["opgate"])
         self.ai = AI()
         self.lim = Limits()
         self.apply_limits()
@@ -1428,6 +1723,7 @@ class Engine:
     def reload(self, tier):
         self.thr[tier].apply(self.st.prof(tier))
         self.cyc[tier].apply(self.st.prof(tier))
+        self.op_gate.apply(self.st["opgate"])
         self.st.save()
         self.apply_limits()
 
@@ -1930,6 +2226,21 @@ class Engine:
                 "hard_edge": bool(_hedge),
                 "hard_score": _hmeta.get("score", 0),
             })
+            # دروازه‌ی عملکرد: فشارِ زنده‌ی API (داشبورد هم همین را می‌خواند)
+            try:
+                _og = self.op_gate.stats()
+                d["op_gate"] = {
+                    "on": bool(_og["on"]),
+                    "load": _og["load"],
+                    "budget": _og["budget"],
+                    "ops_in_window": _og["ops_in_window"],
+                    "blocked": bool(_og["blocked"]),
+                    "quiet": bool(_og["quiet"]),
+                    "floods_recent": _og["floods_recent"],
+                    "floods_total": _og["floods_total"],
+                }
+            except Exception:
+                pass
             if extra:
                 d.update(extra)
             tmp = STATUS_FILE + ".tmp"
@@ -2107,6 +2418,59 @@ class Engine:
             "`تبادل فاصله ۳۰ ۶۰` (تنظیم پایه)",
             "`تبادل تطبیقی` (نمایش همین صفحه)",
         ])
+
+    def op_gate_cmd(self, arg=""):
+        """«تبادل دروازه …» — وضعیت/روشن/خاموش/بودجه/ریستِ دروازه‌ی عملکرد."""
+        g = self.op_gate
+        raw = (arg or "").strip()
+        norm = re.sub(r"\s+", " ", raw.replace("\u200c", " ")).strip()
+        if not norm:
+            return g.status_text()
+        parts = norm.split(None, 1)
+        sub = parts[0].lower()
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        if sub in ("on", "روشن", "فعال"):
+            g.on = True
+            self.st["opgate"]["on"] = True
+            self.st.save()
+            return "✅ دروازه‌ی عملکرد روشن شد.\n" + g.status_text()
+        if sub in ("off", "خاموش", "غیرفعال"):
+            g.on = False
+            self.st["opgate"]["on"] = False
+            self.st.save()
+            return ("⚠️ دروازه‌ی عملکرد خاموش شد — فشار API دیگر اندازه‌گیری "
+                    "نمی‌شود و FloodWait محتمل‌تر است.\n" + g.status_text())
+        if sub in ("reset", "ریست", "بازنشانی"):
+            g.reset()
+            return "♻️ جریمه، سقف فلود و سکوت بازنشانی شد.\n" + g.status_text()
+        if sub in ("quiet", "سکوت", "ادامه"):
+            g.release_quiet()
+            return "▶️ حالت سکوت لغو شد؛ کار ادامه پیدا می‌کند.\n" + g.status_text()
+        if sub in ("budget", "بودجه", "سقف"):
+            try:
+                v = int(num(rest))
+            except Exception:
+                return ("عدد نامعتبر. مثال: `تبادل دروازه بودجه 60`"
+                        "\n" + g.status_text())
+            v = max(8, min(600, v))
+            self.st["opgate"]["budget_per_min"] = v
+            g.apply(self.st["opgate"])
+            self.st.save()
+            return (f"✅ بودجه‌ی پنجره روی {fa(v)} واحد در دقیقه تنظیم شد.\n"
+                    + g.status_text())
+        if sub in ("gap", "فاصله"):
+            try:
+                v = float(str(rest).translate(EN).strip())
+            except Exception:
+                return ("عدد نامعتبر. مثال: `تبادل دروازه فاصله 0.8`"
+                        "\n" + g.status_text())
+            v = max(0.0, min(10.0, v))
+            self.st["opgate"]["min_gap_sec"] = v
+            g.apply(self.st["opgate"])
+            self.st.save()
+            return (f"✅ حداقل فاصله‌ی سراسری روی {v:g} ثانیه تنظیم شد.\n"
+                    + g.status_text())
+        return g.status_text()
 
     def permanent_check_status_text(self):
         x = self.ex_cfg()
@@ -2462,6 +2826,10 @@ class Engine:
             ("گروه ها", "groups"),
             ("پیش قدم", "go"),
             ("پیشقدم", "go"),
+            ("دروازه عملکرد", "opgate"),
+            ("دروازه", "opgate"),
+            ("گیت عملکرد", "opgate"),
+            ("پرفورمنس", "opgate"),
             ("تطبیقی", "adaptive"),
             ("حالت تطبیقی", "adaptive"),
             ("جوین تطبیقی", "adaptive"),
@@ -2523,6 +2891,9 @@ class Engine:
             "خلاصه": "report_now",
             "فاصله تبادل": "gap", "زمان تبادل": "gap",
             "تطبیقی": "adaptive", "حالت تطبیقی": "adaptive", "جوین تطبیقی": "adaptive",
+            "دروازه": "opgate", "دروازه عملکرد": "opgate", "گیت عملکرد": "opgate",
+            "عملکرد": "opgate", "فشار": "opgate", "پرفورمنس": "opgate",
+            "opgate": "opgate", "op_gate": "opgate",
             "بیا": "come", "پیام بیا": "come", "زمان بیا": "cometime",
             "زمان جواب": "replytime", "زمان پاسخ مستقیم": "replytime",
             "replytime": "replytime", "reply_time": "replytime", "reply_delay": "replytime",
@@ -2540,6 +2911,10 @@ class Engine:
 
         if not sub:
             return self.exchange_text()
+
+        # ── دروازه‌ی عملکرد (OpGate): وضعیت/روشن/خاموش/بودجه/ریست ──
+        if sub == "opgate":
+            return self.op_gate_cmd(rest)
 
         if sub in ("on", "روشن"):
             if not self.lim.allowed("exchange"):
@@ -3311,6 +3686,19 @@ class Engine:
             perm_label = f"تا {fa(_perm_max)} ساعت"
         else:
             perm_label = "خاموش"
+        # برچسب دروازه‌ی عملکرد — فشارِ زنده‌ی API در پنجره‌ی غلتان
+        try:
+            _og = self.op_gate.stats()
+            _opgate_line = (
+                f"دروازه‌ی عملکرد: {fa(int(_og['load']))} از "
+                f"{fa(int(_og['budget']))} واحد در دقیقه"
+                + (" — 🤫 سکوت فعال" if _og["quiet"]
+                   else (" — ⏳ سقف فلود" if _og["blocked"] else ""))
+                + "   `تبادل دروازه`")
+            if not _og["on"]:
+                _opgate_line = "دروازه‌ی عملکرد: خاموش   `تبادل دروازه روشن`"
+        except Exception:
+            _opgate_line = "دروازه‌ی عملکرد: —   `تبادل دروازه`"
         lines = [
             "🔁 تبادل",
             "━━━━━━━━━━━━━━",
@@ -3329,6 +3717,7 @@ class Engine:
             f"پاسخ بعد از Join واقعی: {fa(x.get('response_delay_sec', 15))} ثانیه",
             f"انتخاب پیام: مورد {fa(x.get('scan_pick', 2) or 2)} از جدیدترین‌ها",
             f"اسکن گروه: هر {secs(max(30, int(x.get('scan_every_sec', 30) or 30)))}",
+            _opgate_line,
             f"ضد اسپم چندگروهی: {'فعال — بنر اول سر ' + fa(x.get('scan_every_sec', 30)) + ' ثانیه، بقیه ' + fa(x.get('scan_jitter_min_sec', 5)) + '–' + fa(x.get('scan_jitter_max_sec', 15)) + ' ثانیه تصادفی بعد' if len(groups) >= 2 else 'غیرفعال (تک گروه) — وقتی ۲ گروه بذاری خودکار فعال میشه'}   `تبادل اسکن تصادفی`",
             f"سن مجاز لینک: حداکثر {fa(max(1, int(x.get('scan_max_age_sec', 300) or 300)) // 60)} دقیقه",
             f"گروه‌های ثبت‌شده: {fa(len(groups))}",
@@ -3359,6 +3748,7 @@ class Engine:
             "گزارش خلاصه همین حالا: `گزارش خلاصه`",
             "فاصله Join: `تبادل فاصله`",
             "تطبیقی هوشمند: `تبادل تطبیقی` (Flood + آپ‌تایم)",
+            "دروازه‌ی عملکرد: `تبادل دروازه` (فشار API + حالت سکوت)",
             "نگهبانی عضویت: `تبادل دائمی` (سقف ساعت + وضعیت)",
             "بررسی عضویت: `تبادل بررسی ۱۵ ۳۰`",
             "اخطار لفت: `تبادل اخطار ۲` (پیش‌فرض ۲ نبودنِ تأییدشده)",
@@ -4516,6 +4906,9 @@ async def connect_and_run(eng, creds):
 
     async def note(text):
         try:
+            # گزارش‌های PV هم فشار API دارند: حساب می‌شوند ولی هرگز
+            # متوقف نمی‌شوند (صاحب‌حساب باید خبرها را ببیند).
+            eng.op_gate.record("note")
             _track_own(await client.send_message("me", text, link_preview=False))
         except Exception:
             pass
@@ -4876,6 +5269,10 @@ async def connect_and_run(eng, creds):
             eng.log("info", "dry_run_send", f"#{qid} → {tgt}")
             return
         try:
+            # دروازه‌ی عملکرد: این ارسال هم در فشارِ کلِ پنجره حساب می‌شود.
+            # (صبر کردن لازم نیست — Throttle همین صف را با فاصله‌ی بلند
+            #  نگه می‌دارد؛ اینجا فقط «حساب» می‌کنیم.)
+            eng.op_gate.record("send")
             sent = await client.send_message(tgt, text, link_preview=False)
             mid = getattr(sent, "id", None)
             eng.db.mark_sent(qid, mid)
@@ -4884,6 +5281,7 @@ async def connect_and_run(eng, creds):
         except FloodWaitError as e:
             w = getattr(e, "seconds", 60)
             eng.thr[tier].penalize(w)
+            eng.op_gate.penalize(w, "send")
             eng.db.mark_failed(qid, f"FloodWait {w}s", retry_at=time.time() + w + 2)
             eng.log("warn", "flood", f"#{qid}: {w}s")
         except (ChatWriteForbiddenError, ChannelPrivateError,
@@ -4920,9 +5318,16 @@ async def connect_and_run(eng, creds):
             w = check_gate.wait()
             if w > 45:
                 return None
+            # دروازه‌ی عملکرد: فشارِ *کل* API هم حساب می‌شود (چک = ۲ واحد).
+            # بدون این، چک‌ها آرام بودند ولی جوین/ارسال پشت‌سرهم فلود می‌خورد.
+            ow = eng.op_gate.wait("check")
+            if ow > 45:
+                return None
+            w = max(w, min(ow, 45))
             if w > 0:
                 await asyncio.sleep(w)
             check_gate.record()
+            eng.op_gate.record("check")
             try:
                 await client(GetParticipantRequest(ch, user_id))
                 return True
@@ -4931,6 +5336,7 @@ async def connect_and_run(eng, creds):
             except FloodWaitError as e:
                 w = getattr(e, "seconds", 60)
                 check_gate.penalize(w)
+                eng.op_gate.penalize(w, "check")
                 # فیکس: فلودِ «بررسی عضویت» ربطی به ظرفیت ارسال ندارد؛
                 # قبلاً تروتیل ارسال هم جریمه می‌شد و کل ربات فریز می‌شد
                 # (نه پیام می‌رفت نه لفت انجام می‌شد). فقط گیت چک می‌ایستد.
@@ -4969,6 +5375,16 @@ async def connect_and_run(eng, creds):
         """جوین به کانال. برمی‌گرداند (موفق, پیام, عنوان)"""
         if DRY_RUN:
             return True, "joined", "DRY_RUN"
+        # دروازه‌ی عملکرد: جوین گران‌ترین عملیات است (۳ واحد فشار).
+        # اگر پنجره پر است یا سقف فلود/سکوت فعال، کمی صبر می‌کنیم — بهتر از
+        # یک FloodWait چندساعته روی «تعداد جوین روزانه».
+        try:
+            ow = eng.op_gate.wait("join")
+            if ow > 0:
+                await asyncio.sleep(min(ow, 300))
+            eng.op_gate.record("join")
+        except Exception:
+            pass
         try:
             if is_invite(link):
                 upd = await client(ImportChatInviteRequest(invite_hash(link)))
@@ -4996,6 +5412,7 @@ async def connect_and_run(eng, creds):
         except FloodWaitError as e:
             w = getattr(e, "seconds", 60)
             eng.join_thr.penalize(w)
+            eng.op_gate.penalize(w, "join")
             eng.db.log("warn", "ex_flood", f"join {link}: {w}s")
             try:
                 eng.adaptive_on_flood(w)
@@ -5014,6 +5431,14 @@ async def connect_and_run(eng, creds):
     async def leave_link(link):
         if DRY_RUN:
             return True, ""
+        # دروازه‌ی عملکرد: لفت هم رزول + درخواست نوشتنی است (۲ واحد فشار)
+        try:
+            ow = eng.op_gate.wait("leave")
+            if ow > 0:
+                await asyncio.sleep(min(ow, 180))
+            eng.op_gate.record("leave")
+        except Exception:
+            pass
         try:
             ent = await client.get_entity(link)
             await client(LeaveChannelRequest(ent))
@@ -5021,6 +5446,7 @@ async def connect_and_run(eng, creds):
         except FloodWaitError as e:
             w = getattr(e, "seconds", 60)
             eng.join_thr.penalize(w)
+            eng.op_gate.penalize(w, "leave")
             eng.db.log("warn", "ex_flood", f"leave {link}: {w}s")
             try:
                 eng.adaptive_on_flood(w)
@@ -5065,11 +5491,22 @@ async def connect_and_run(eng, creds):
             await asyncio.sleep(delay)
         try:
             if not DRY_RUN:
+                # دروازه‌ی عملکرد: ارسال هم فشار دارد (۱ واحد) و باید بعد از
+                # پر شدن پنجره کمی صبر کند، نه اینکه FloodWait بخورد.
+                ow = eng.op_gate.wait("send")
+                if ow > 0:
+                    await asyncio.sleep(min(ow, 120))
+                eng.op_gate.record("send")
                 await client.send_message(chat, body, reply_to=mid, link_preview=False)
             eng.db.ex_set(rec["id"], replied=1)
             eng.log("ok", "ex_reply" if not DRY_RUN else "dry_run_reply",
                     f"#{rec['id']}")
             return True
+        except FloodWaitError as e:
+            w = getattr(e, "seconds", 60)
+            eng.op_gate.penalize(w, "send")
+            eng.log("warn", "ex_reply", f"#{rec['id']}: FloodWait {w}s")
+            return False
         except Exception as e:
             eng.log("warn", "ex_reply", f"#{rec['id']}: {type(e).__name__}: {e}")
             return False
@@ -5201,8 +5638,18 @@ async def connect_and_run(eng, creds):
             return False
         try:
             if not DRY_RUN:
+                # دروازه‌ی عملکرد: «نیومدی» هم یک ارسال واقعی است
+                ow = eng.op_gate.wait("send")
+                if ow > 0:
+                    await asyncio.sleep(min(ow, 120))
+                eng.op_gate.record("send")
                 await client.send_message(chat, body, reply_to=mid, link_preview=False)
             return True
+        except FloodWaitError as e:
+            w = getattr(e, "seconds", 60)
+            eng.op_gate.penalize(w, "send")
+            eng.log("warn", "ex_reminder", f"#{rec['id']}: FloodWait {w}s")
+            return False
         except Exception as e:
             eng.log("warn", "ex_reminder", f"#{rec['id']}: {type(e).__name__}: {e}")
             return False
@@ -5606,6 +6053,7 @@ async def connect_and_run(eng, creds):
                 # پیش‌فرض مورد ۱ یعنی تازه‌ترین لینک؛ اگر وجود نداشت،
                 # آخرین پیام معتبر انتخاب می‌شود.
                 pick = max(1, int(x.get("scan_pick", 1) or 1))
+                eng.op_gate.record("scan")
                 async for msg in client.iter_messages(g, limit=x["scan_limit"]):
                     if not msg:
                         continue
@@ -5674,6 +6122,7 @@ async def connect_and_run(eng, creds):
 
             except FloodWaitError as e:
                 w = getattr(e, "seconds", 60)
+                eng.op_gate.penalize(w, "scan")
                 eng.log("warn", "scan_flood", f"{g}: {w}s")
                 await asyncio.sleep(min(w, 60))
                 continue
@@ -5772,6 +6221,8 @@ async def connect_and_run(eng, creds):
                 try:
                     check_gate.set_load(len(eng.db.ex_list("joined", 500)))
                     check_gate.maybe_decay()
+                    # دروازه‌ی عملکرد هم کم‌کم جریمه‌اش را برمی‌گرداند
+                    eng.op_gate.maybe_decay()
                 except Exception:
                     pass
                 # ── یادآوری عضو‌نشده: دو پیام «نیومدی» با فاصله‌ی تصادفی ──
