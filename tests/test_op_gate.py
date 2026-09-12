@@ -68,6 +68,9 @@ T = 1_700_000_000.0
 # ════════════════════════════════════════════════════════════
 og = m.DEFAULTS["opgate"]
 check(og["on"] is True, "1: دروازه پیش‌فرض روشن است")
+check(og["serialize"] is True, "1: صفِ تک‌نفره پیش‌فرض روشن است (دونه‌دونه)")
+check(float(og["pause_min_sec"]) == 0.6 and float(og["pause_max_sec"]) == 1.8,
+      "1: مکث پیش‌فرض بعد از هر عملیات ۰.۶ تا ۱.۸ ثانیه")
 check(int(og["budget_per_min"]) == 40, "1: بودجه پیش‌فرض ۴۰ واحد در دقیقه")
 check(float(og["min_gap_sec"]) == 0.4, "1: حداقل فاصله پیش‌فرض ۰.۴ ثانیه")
 check(int(og["window_sec"]) == 60, "1: پنجره پیش‌فرض ۶۰ ثانیه")
@@ -326,9 +329,10 @@ eng = fresh_engine()
 eng.op_gate.record("join")
 eng.op_gate.record("check")
 ex = eng.exchange_text()
-check("دروازه‌ی عملکرد:" in ex and "واحد در دقیقه" in ex,
-      "11: پنل تبادل فشارِ زنده را نشان می‌دهد")
-check("`تبادل دروازه`" in ex, "11: پنل تبادل دستور را هم می‌گوید")
+check("دروازه‌ی عملکرد:" in ex and "دونه‌دونه" in ex,
+      "11: پنل تبادل می‌گوید کارها دونه‌دونه انجام می‌شود")
+check("مکث" in ex and "فشار" in ex and "`تبادل دروازه`" in ex,
+      "11: پنل تبادل مکث، فشار و دستور را نشان می‌دهد")
 eng.op_gate.on = False
 check("دروازه‌ی عملکرد: خاموش" in eng.exchange_text(),
       "11: پنل تبادل خاموش بودن را نشان می‌دهد")
@@ -340,12 +344,14 @@ with open("jafj_status.json", encoding="utf-8") as f:
 check("op_gate" in sdata, "11: فایل status کلید op_gate دارد")
 check(sdata["op_gate"]["load"] == 5.0 and sdata["op_gate"]["budget"] == 40.0,
       "11: status فشار و بودجه‌ی زنده را می‌نویسد (۳ + ۲ = ۵)")
+check(sdata["op_gate"]["serialize"] is True and sdata["op_gate"]["in_flight"] == 0,
+      "11: status صفِ تک‌نفره و عملیاتِ در جریان را دارد")
 check(sdata["op_gate"]["on"] is True and sdata["op_gate"]["quiet"] is False,
       "11: status وضعیت روشن/سکوت را دارد")
 
 check("دروازه‌ی عملکرد (OpGate)" in m.HELP, "11: HELP بخش دروازه دارد")
-check("تبادل دروازه بودجه 60" in m.HELP and "تبادل دروازه خاموش" in m.HELP,
-      "11: HELP دستورها را مستند می‌کند")
+check("تبادل دروازه مکث 1 3" in m.HELP and "تبادل دروازه پشت‌سرهم خاموش" in m.HELP,
+      "11: HELP دستورهای مکث و صف را مستند می‌کند")
 print("DONE 11 surfaces")
 
 
@@ -355,56 +361,69 @@ print("DONE 11 surfaces")
 k = src.find("async def peer_in_my_channel")
 k2 = src.find("async def confirm_peer_membership", k)
 seg = src[k:k2]
-check('eng.op_gate.wait("check")' in seg, "12: چک عضویت از دروازه رد می‌شود")
-check('eng.op_gate.record("check")' in seg, "12: چک عضویت فشارش را ثبت می‌کند")
+check('eng.op_gate.hold("check", max_wait=45)' in seg,
+      "12: چک عضویت داخل صفِ تک‌نفره است")
 check('eng.op_gate.penalize(w, "check")' in seg, "12: فلودِ چک دروازه را جریمه می‌کند")
-check("if ow > 45:" in seg, "12: چکِ پشتِ صفِ طولانی اصلاً زده نمی‌شود")
+check("if not allowed:" in seg and "return None" in seg,
+      "12: چکِ پشتِ صفِ طولانی اصلاً زده نمی‌شود (نامشخص)")
 
 k = src.find("async def join_link")
 k2 = src.find("async def leave_link", k)
 seg = src[k:k2]
-check('eng.op_gate.wait("join")' in seg and 'eng.op_gate.record("join")' in seg,
-      "12: جوین از دروازه رد می‌شود و ثبت می‌شود")
+check('async with eng.op_gate.hold("join"):' in seg,
+      "12: جوین داخل صفِ تک‌نفره است")
 check('eng.op_gate.penalize(w, "join")' in seg, "12: فلودِ جوین دروازه را جریمه می‌کند")
 
 k = src.find("async def leave_link")
 k2 = src.find("async def reply_joined", k)
 seg = src[k:k2]
-check('eng.op_gate.record("leave")' in seg
+check('async with eng.op_gate.hold("leave"):' in seg
       and 'eng.op_gate.penalize(w, "leave")' in seg,
-      "12: لفت هم حساب و جریمه دارد")
+      "12: لفت هم در صف است و جریمه دارد")
 
 k = src.find("async def deliver")
 k2 = src.find("async def note", k)
 seg = src[k:k2]
-check('eng.op_gate.record("send")' in seg and 'eng.op_gate.penalize(w, "send")' in seg,
-      "12: صف ارسال هم در فشارِ کل حساب می‌شود")
+check('eng.op_gate.hold("send")' in seg and 'eng.op_gate.penalize(w, "send")' in seg,
+      "12: صف ارسال هم دونه‌دونه می‌رود")
 
 k = src.find("async def send_not_joined_reminder")
 k2 = src.find("# ---------- پیدا کردن کانال طرف", k)
 seg = src[k:k2]
-check('eng.op_gate.wait("send")' in seg and 'eng.op_gate.record("send")' in seg,
-      "12: پیام «نیومدی» هم از دروازه رد می‌شود")
+check('eng.op_gate.hold("send", max_wait=180)' in seg,
+      "12: پیام «نیومدی» هم در صف است")
 
 k = src.find("async def scan_groups")
 k2 = src.find("async def scan_loop", k)
 seg = src[k:k2]
-check('eng.op_gate.record("scan")' in seg and 'eng.op_gate.penalize(w, "scan")' in seg,
-      "12: اسکن گروه حساب و جریمه دارد")
+check('eng.op_gate.hold("scan")' in seg and 'eng.op_gate.penalize(w, "scan")' in seg,
+      "12: اسکن گروه در صف است و جریمه دارد")
+
+k = src.find("async def note(text)")
+check('eng.op_gate.hold("note")' in src[k:k + 500],
+      "12: گزارش‌های PV هم در همان صف می‌روند")
+
+k = src.find("async def _say(")
+check('eng.op_gate.hold("send")' in src[k:k + 900],
+      "12: پاسخِ پنل هم در صف است")
+
+k = src.find("async def find_their_channel")
+k2 = src.find("# ---------- دریافت درخواست تبادل", k)
+check(src[k:k2].count('eng.op_gate.hold("resolve")') >= 2,
+      "12: رزولِ کانال طرف (پیام‌ها + پروفایل) در صف است")
 
 k = src.find("async def membership_loop")
 k2 = src.find("# ── یادآوری عضو‌نشده", k)
 check("eng.op_gate.maybe_decay()" in src[k:k2],
       "12: حلقه‌ی بررسی، جریمه‌ی دروازه را برمی‌گرداند")
 
-k = src.find("async def note(text)")
-check('eng.op_gate.record("note")' in src[k:k + 400],
-      "12: گزارش‌های PV هم حساب می‌شوند (ولی متوقف نمی‌شوند)")
-
 check("self.op_gate = OpGate(self.st[\"opgate\"])" in src,
       "12: دروازه روی Engine ساخته می‌شود")
 check("self.op_gate.apply(self.st[\"opgate\"])" in src,
       "12: reload، تنظیمات دروازه را تازه می‌کند")
+check(src.count("eng.op_gate.hold(") >= 10,
+      "12: همه‌ی مسیرهای API از hold رد می‌شوند (نه فقط چندتا)")
+check("asyncio.Lock()" in src, "12: قفلِ واقعی asyncio ساخته می‌شود")
 print("DONE 12 wiring")
 
 
@@ -484,6 +503,129 @@ res = _aio.run(peer_in_my_channel(12345))
 check(res is None and len(calls) == 0,
       "13: وقتی دروازه بسته است هیچ GetParticipant زده نمی‌شود")
 print("DONE 13 behaviour")
+
+
+# ════════════════════════════════════════════════════════════
+# 14 — هسته‌ی فیکس: کارها «دونه‌دونه» + مکث بینشان
+#     (باگ اصلی: هفت حلقه‌ی موازی هم‌زمان درخواست API می‌زدند)
+# ════════════════════════════════════════════════════════════
+GATE_CFG = {"budget_per_min": 1000, "min_gap_sec": 0.0, "window_sec": 60,
+            "pause_min_sec": 0.2, "pause_max_sec": 0.25, "serialize": True}
+
+
+def burst(cfg, n=6, work=0.03):
+    # n کارِ هم‌زمان را با هم هل می‌دهد و زمان‌بندیِ واقعی را برمی‌گرداند.
+    g = m.OpGate(dict(cfg))
+    st = {"in": 0, "peak": 0, "done": []}
+
+    async def worker():
+        async with g.hold("send") as ok:
+            if not ok:
+                return
+            st["in"] += 1
+            st["peak"] = max(st["peak"], st["in"])
+            await _aio.sleep(work)          # شبیه یک درخواستِ واقعی API
+            st["in"] -= 1
+            st["done"].append(time.time())
+
+    async def all_():
+        await _aio.gather(*[worker() for _ in range(n)])
+
+    t0 = time.time()
+    _aio.run(all_())
+    return g, st, time.time() - t0
+
+
+# الف) با صفِ تک‌نفره: هیچ‌وقت دو کار روی هم نمی‌افتد
+g, st, took = burst(GATE_CFG)
+check(len(st["done"]) == 6, "14: هر شش کار انجام شدند (هیچ‌کدام گم نشد)")
+check(st["peak"] == 1, "14: هیچ لحظه‌ای دو عملیات هم‌زمان در جریان نبود")
+check(g.max_in_flight == 1, "14: دروازه هم بیشترین هم‌زمانی را ۱ ثبت کرد")
+gaps = [b - a for a, b in zip(st["done"], st["done"][1:])]
+check(len(gaps) == 5 and min(gaps) >= 0.19,
+      "14: بین پایانِ هر کار و کار بعدی حداقل مکث افتاد")
+check(max(gaps) < 1.0, "14: مکث بی‌دلیل هم بلند نشد")
+check(took >= 6 * 0.03 + 5 * 0.19,
+      "14: کلِ زمان = کار + مکث‌ها (یعنی واقعاً پشت‌سرهم رفتند)")
+check(g.in_flight == 0 and g.queue_len == 0,
+      "14: بعد از پایان، نه کاری در جریان است نه صفی مانده")
+check(g.max_queue >= 2, "14: بقیه پشت قفل صف کشیده بودند (نه هم‌زمان)")
+print("DONE 14 serialized")
+
+# ب) همان بار، ولی با صفِ خاموش → هم‌پوشانی می‌شود (ثابت می‌کند باگ واقعی بود)
+_off = dict(GATE_CFG)
+_off["serialize"] = False
+g2, st2, took2 = burst(_off)
+check(st2["peak"] > 1,
+      "14: با صفِ خاموش کارها هم‌زمان می‌شوند — همان باگی که گزارش شده بود")
+check(took2 < took, "14: حالت موازی سریع‌تر است ولی روی هم می‌ریزد")
+print("DONE 14 parallel baseline")
+
+# ج) مکثِ تصادفی بعد از هر کار واقعاً قرعه می‌خورد
+g3 = m.OpGate(GATE_CFG)
+seen = set()
+for _ in range(12):
+    g3._after_op()
+    seen.add(round(g3.next_gap, 4))
+check(len(seen) > 3, "14: مکثِ بعدی تصادفی است (عدد ثابت نیست)")
+check(min(seen) >= 0.2 - 1e-9 and max(seen) <= 0.25 + 1e-9,
+      "14: مکث داخل بازه‌ی تنظیم‌شده می‌ماند")
+
+# د) ورودِ تودرتو از همان تسک بن‌بست نمی‌کند (مثلاً note داخل یک چک)
+g4 = m.OpGate(GATE_CFG)
+
+
+async def nested():
+    async with g4.hold("join") as ok1:
+        async with g4.hold("note") as ok2:
+            return bool(ok1 and ok2)
+
+
+check(_aio.run(_aio.wait_for(nested(), 5)) is True,
+      "14: ورودِ تودرتو از همان تسک بن‌بست نمی‌کند")
+
+# ه) وقتی صف/سقف بلند است، کارِ غیرضروری بی‌خیال می‌شود (نه اینکه معطل بماند)
+g5 = m.OpGate(GATE_CFG)
+g5.penalize(600, "join")
+
+
+async def skipper():
+    async with g5.hold("check", max_wait=45) as ok:
+        return ok
+
+
+check(_aio.run(_aio.wait_for(skipper(), 5)) is False,
+      "14: با سقفِ فلودِ بلند، چک بی‌درنگ False می‌گیرد")
+print("DONE 14 gate behaviour")
+
+
+# ════════════════════════════════════════════════════════════
+# 15 — دستورهای تازه‌ی پنل (مکث / صفِ تک‌نفره)
+# ════════════════════════════════════════════════════════════
+eng = fresh_engine()
+out = eng.exchange_cmd("دروازه")
+check("دونه‌دونه" in out and "مکث بعد از هر کار" in out,
+      "15: وضعیت، صف و مکث را نشان می‌دهد")
+out = eng.exchange_cmd("دروازه مکث 1 3")
+check(abs(eng.op_gate.pause_min - 1.0) < 1e-9 and abs(eng.op_gate.pause_max - 3.0) < 1e-9,
+      "15: «دروازه مکث 1 3» بازه‌ی مکث را تنظیم می‌کند")
+check(eng.st["opgate"]["pause_min_sec"] == 1.0
+      and eng.st["opgate"]["pause_max_sec"] == 3.0,
+      "15: مکث در تنظیمات ذخیره می‌شود")
+out = eng.exchange_cmd("دروازه مکث ۲")
+check(abs(eng.op_gate.pause_min - 2.0) < 1e-9 and eng.op_gate.pause_max >= 2.0,
+      "15: مکث با عدد فارسی و تک‌عدد هم کار می‌کند")
+check("نامعتبر" in eng.exchange_cmd("دروازه مکث الف"),
+      "15: مکثِ نامعتبر پیام خطا می‌دهد")
+
+out = eng.exchange_cmd("دروازه پشت‌سرهم خاموش")
+check(eng.op_gate.serialize is False and eng.st["opgate"]["serialize"] is False,
+      "15: «پشت‌سرهم خاموش» صف را خاموش و ذخیره می‌کند")
+check("موازی" in eng.exchange_cmd("دروازه"), "15: وضعیت، موازی بودن را هشدار می‌دهد")
+out = eng.exchange_cmd("دروازه پشت‌سرهم روشن")
+check(eng.op_gate.serialize is True and eng.st["opgate"]["serialize"] is True,
+      "15: «پشت‌سرهم روشن» صف را برمی‌گرداند")
+print("DONE 15 new commands")
 
 
 print("FAILED " + "; ".join(FAILS) if FAILS else "DONE PASS")
