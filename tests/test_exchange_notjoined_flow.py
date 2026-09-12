@@ -181,7 +181,25 @@ class FakeClient:
         self.sent.append((chat, body, reply_to))
 
 fake = FakeClient()
-ns = {"eng": eng, "client": fake, "DRY_RUN": m.DRY_RUN}
+
+
+# تابع واقعی حالا از دروازه‌ی عملکرد (OpGate) هم رد می‌شود، یعنی به
+# asyncio.sleep و FloodWaitError نیاز دارد. هارنس همان نام‌ها را با نسخه‌ی
+# بی‌اثر می‌دهد تا خواب واقعی تست را کند نکند.
+class GateAsyncio:
+    slept = []
+
+    @staticmethod
+    async def sleep(s):
+        GateAsyncio.slept.append(s)
+
+
+class FakeFloodWait(Exception):
+    seconds = 60
+
+
+ns = {"eng": eng, "client": fake, "DRY_RUN": m.DRY_RUN,
+      "asyncio": GateAsyncio, "FloodWaitError": FakeFloodWait}
 exec(fn_src, ns)
 send_rem = ns["send_not_joined_reminder"]
 
@@ -398,6 +416,8 @@ harness_src = (
     "    now_rem = int(time.time())\n"
     "    confirm_peer_membership = stub.confirm\n"
     "    send_not_joined_reminder = stub.send_rem\n"
+    # حلقه حالا از محافظِ ضدِ تکرار رد می‌شود؛ در هارنس همان stub کافی است
+    "    say_not_joined = stub.send_rem\n"
     "    leave_link = stub.leave\n"
     "    reminder_delay = stub.reminder_delay\n"
     "    membership_check_delay = stub.check_delay\n"

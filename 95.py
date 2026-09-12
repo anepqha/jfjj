@@ -201,6 +201,28 @@ DEFAULTS = {
         "_last_off": 0,          # زمان آخرین خاموشی خودکار
         "_last_alert": 0,        # زمان آخرین هشدار (ضد اسپم نوتیف)
     },
+
+    # ── دروازه‌ی عملکرد سراسری (OpGate) ───────────────
+    #  CheckGate فقط «بررسی عضویت» را پخش می‌کند؛ ولی سلف هم‌زمان جوین/لفت،
+    #  رزولِ یوزرنیم، ارسال پیام و اسکن گروه هم می‌زند. این بخش بودجه‌ی
+    #  «فشارِ کل» روی API تلگرام را در یک پنجره‌ی غلتان ۶۰ ثانیه‌ای تعیین
+    #  می‌کند تا مسیرهای نوشتنی (جوین/ارسال) پشت‌سرهم فلود نخورند.
+    "opgate": {
+        "on": True,                  # پیش‌فرض روشن (با «تبادل دروازه خاموش» خاموش می‌شود)
+        # ── دونه‌دونه (مهم‌ترین بخش) ──
+        #  هفت حلقه‌ی موازی (ارسال/تبادل/اسکن/بررسی/گزارش/ریسک/وضعیت) هم‌زمان
+        #  کار می‌کنند؛ بدون قفل، چند درخواست API روی هم می‌افتادند.
+        "serialize": True,           # فقط یک عملیات API در هر لحظه (قفل سراسری)
+        "pause_min_sec": 15,         # مکث تصادفی بعد از «پایانِ» هر عملیات
+        "pause_max_sec": 20,         # (پیش‌فرض ۱۵ تا ۲۰ ثانیه — درخواست صاحب‌حساب)
+        "budget_per_min": 40,        # چند «واحد فشار» در پنجره مجاز است
+        "min_gap_sec": 0.4,          # کفِ فاصله‌ی سراسری بین دو عملیات API
+        "window_sec": 60,            # طول پنجره‌ی غلتان
+        "quiet_floods": 3,           # چند FloodWait در بازه‌ی زیر → حالت سکوت
+        "quiet_window_min": 10,      # بازه‌ی شمارش فلودها (دقیقه)
+        "quiet_minutes": 15,         # طول حالت سکوت (دقیقه)
+        "decay_min": 10,             # هر چند دقیقه بی‌فلودی، یک پله بودجه برگردد
+    },
 }
 
 SESSION = "jafj"
@@ -227,6 +249,7 @@ import shutil
 import random
 import sqlite3
 import asyncio
+import contextlib
 import threading
 import traceback
 import http.cookiejar
@@ -809,6 +832,419 @@ class CheckGate:
         return now < self.cooldown_until
 
 
+# ─────────────────────────────────────────────
+#  دروازه‌ی عملکرد سراسری (OpGate)
+# ─────────────────────────────────────────────
+class OpGate:
+    """دروازه‌ی عملکرد — همه‌ی عملیات API «دونه‌دونه» و با مکث.
+
+    مشکل اصلی: هفت حلقه‌ی موازی با `asyncio.create_task` بالا می‌آیند
+    (ارسال، تبادل، اسکن، بررسی عضویت، گزارش، ریسک، وضعیت) و هیچ قفلی بینشان
+    نبود. نتیجه: چند درخواست API **هم‌زمان** زده می‌شد — نه اینکه یکی تمام
+    شود، کمی مکث شود، بعدی برود. تلگرام هم دقیقاً همین الگوی انفجاری را با
+    FloodWait جریمه می‌کند.
+
+    این دروازه دو کار می‌کند:
+      ۱) **صفِ تک‌نفره (قفل سراسری)** — `hold()` یک `asyncio.Lock` می‌گیرد، پس
+         در هر لحظه فقط یک عملیات API در جریان است؛ بقیه پشت همان قفل
+         می‌ایستند تا کارِ قبلی **تمام** شود.
+      ۲) **مکث بعد از هر کار** — بعد از پایانِ هر عملیات، یک مکث تصادفی
+         (پیش‌فرض ۰.۶ تا ۱.۸ ثانیه) می‌آید و عملیات بعدی زودتر از آن رد نمی‌شود.
+
+    علاوه بر این، بودجه‌ی «فشارِ کل» را در یک پنجره‌ی غلتان ۶۰ ثانیه‌ای حساب
+    می‌کند (جوین ۳، لفت/چک/رزول ۲، ارسال/اسکن/نوت ۱ واحد)، روی FloodWait سقف
+    سراسری + جریمه‌ی بودجه می‌گذارد، بعد از چند فلود پشت‌سرهم «حالت سکوت»
+    می‌سازد و بعد از مدت بی‌فلودی بودجه را پله‌پله برمی‌گرداند.
+
+    ورودی تودرتو از همان تسک مجاز است (قفل دوباره گرفته نمی‌شود) تا مثلاً
+    گزارشِ داخل یک مسیرِ در جریان، بن‌بست نسازد.
+
+    مثل CheckGate همه‌ی متدهای همگام `now` اختیاری می‌گیرند تا قطعی و قابل
+    تست باشند.
+    """
+
+    # وزنِ هر دسته عملیات (واحد فشار)
+    COSTS = {"join": 3.0, "leave": 2.0, "check": 2.0, "resolve": 2.0,
+             "send": 1.0, "scan": 1.0, "note": 1.0, "other": 1.0}
+
+    def __init__(self, cfg=None):
+        self.on = True
+        self.serialize = True
+        self.pause_min = 15.0
+        self.pause_max = 20.0
+        self.base_budget = 40.0
+        self.min_gap = 0.4
+        self.window = 60.0
+        self.quiet_floods = 3
+        self.quiet_window = 600.0
+        self.quiet_for = 900.0
+        self.decay_sec = 600.0
+        self.max_penalty = max(2.0, self.base_budget * 0.6)
+        self.penalty = 0.0
+        if cfg:
+            self.apply(cfg)
+        self._lock = None           # قفل سراسری — تنبل ساخته می‌شود
+        self._owner = None          # تسکی که الان قفل را دارد (برای ورود تودرتو)
+        self.in_flight = 0          # چند عملیات الان در جریان است (باید ۰ یا ۱ باشد)
+        self.max_in_flight = 0      # بیشترین هم‌زمانیِ دیده‌شده (تشخیص/تست)
+        self.queue_len = 0          # چند نفر پشت قفل منتظرند
+        self.max_queue = 0
+        self.total_wait_sec = 0.0   # مجموع زمانی که پشت قفل/دروازه صرف شد
+        self.next_gap = self.min_gap
+        self.hits = []              # (ts, cost, kind) — فشارِ داخل پنجره
+        self.floods = []            # ts فلودهای اخیر
+        self.cooldown_until = 0.0   # سقفِ خودِ FloodWait
+        self.quiet_until = 0.0      # پایان حالت سکوت
+        self.last = 0.0             # زمان آخرین عملیات (برای حداقل فاصله)
+        self.last_flood = 0.0
+        self.last_decay = 0.0
+        self.last_kind = ""
+        self.last_flood_kind = ""
+        self.last_quiet_reason = ""
+        self.total_ops = 0
+        self.total_cost = 0.0
+        self.total_floods = 0
+        self.quiet_rounds = 0
+        self.last_msg = {}          # peer/link → زمانِ آخرین پیامِ تبادل
+
+    # ── پیکربندی ──────────────────────────────────────
+    def apply(self, cfg):
+        """تنظیم‌ها را می‌خواند؛ شمارنده‌های زنده (فشار/فلود) دست نمی‌خورند."""
+        c = cfg or {}
+        self.on = bool(c.get("on", True))
+        self.serialize = bool(c.get("serialize", True))
+        self.pause_min = max(0.0, float(c.get("pause_min_sec", 15) or 0.0))
+        self.pause_max = max(self.pause_min,
+                             float(c.get("pause_max_sec", 20) or self.pause_min))
+        self.base_budget = max(1.0, float(c.get("budget_per_min", 40) or 40))
+        self.min_gap = max(0.0, float(c.get("min_gap_sec", 0.4) or 0.0))
+        self.window = max(1.0, float(c.get("window_sec", 60) or 60))
+        self.quiet_floods = max(1, int(c.get("quiet_floods", 3) or 3))
+        self.quiet_window = max(1.0, 60.0 * float(c.get("quiet_window_min", 10) or 10))
+        self.quiet_for = max(1.0, 60.0 * float(c.get("quiet_minutes", 15) or 15))
+        self.decay_sec = max(1.0, 60.0 * float(c.get("decay_min", 10) or 10))
+        self.max_penalty = max(2.0, self.base_budget * 0.6)
+        self.penalty = min(self.penalty, self.max_penalty)
+
+    # ── محاسبه‌ها ─────────────────────────────────────
+    def cost(self, kind):
+        return float(self.COSTS.get(kind or "other", 1.0))
+
+    def budget(self):
+        """بودجه‌ی مؤثر پنجره (پایه − جریمه‌ی فلود).
+
+        کف ۱ واحد: بودجه هیچ‌وقت صفر نمی‌شود تا دروازه قفلِ دائمی نسازد؛
+        عملیاتِ گران‌تر از کل بودجه هم در `wait` استثنا شده است.
+        """
+        return max(1.0, self.base_budget - self.penalty)
+
+    def _trim(self, now):
+        cut = now - self.window
+        if self.hits and self.hits[0][0] <= cut:
+            self.hits = [h for h in self.hits if h[0] > cut]
+
+    def load(self, now=None):
+        """مجموع واحدِ فشارِ داخل پنجره‌ی فعلی."""
+        now = now if now is not None else time.time()
+        self._trim(now)
+        return sum(h[1] for h in self.hits)
+
+    def hard_until(self, now=None):
+        now = now if now is not None else time.time()
+        return max(self.cooldown_until, self.quiet_until)
+
+    def blocked(self, now=None):
+        """سقف فلود یا حالت سکوت فعال است؟"""
+        now = now if now is not None else time.time()
+        return now < self.hard_until(now)
+
+    def wait(self, kind="other", now=None):
+        """چند ثانیه صبر لازم است تا این عملیات رد شود (۰ = همین حالا).
+
+        سه چیز را با هم در نظر می‌گیرد: سقفِ فلود/سکوت، حداقل فاصله‌ی
+        سراسری، و پر بودن بودجه‌ی پنجره. هیچ حالت تغییری نمی‌دهد (فقط
+        `record` حساب می‌کند) تا صدازدنِ مکررِ `wait` چیزی را خراب نکند.
+        """
+        now = now if now is not None else time.time()
+        if not self.on:
+            return 0.0
+        hard = self.hard_until(now)
+        if now < hard:
+            return hard - now
+        # مکثِ بعد از آخرین عملیات (تصادفی) — کفش min_gap است
+        gap = max(self.min_gap, self.next_gap or 0.0)
+        w = max(0.0, (self.last + gap) - now) if self.last else 0.0
+        need = self.cost(kind)
+        cap = self.budget()
+        if need > cap:
+            # عملیات از کل بودجه گران‌تر است — هرگز نباید قفل دائمی شود
+            return w
+        self._trim(now)
+        over = sum(h[1] for h in self.hits) + need - cap
+        for ts, c, _k in sorted(self.hits):
+            if over <= 0:
+                break
+            # لحظه‌ای که این عملیاتِ قدیمی از پنجره بیرون می‌رود
+            w = max(w, (ts + self.window) - now)
+            over -= c
+        return max(0.0, w)
+
+    def record(self, kind="other", cost=None, now=None):
+        """یک عملیاتِ واقعی زده شد → فشارش را در پنجره ثبت کن."""
+        now = now if now is not None else time.time()
+        c = self.cost(kind) if cost is None else max(0.0, float(cost))
+        self.hits.append((now, c, kind))
+        self.last = max(self.last, now)
+        self.last_kind = kind or "other"
+        self.total_ops += 1
+        self.total_cost += c
+        self._trim(now)
+        return c
+
+    # ── دونه‌دونه: قفل سراسری + مکث بعد از هر کار ─────
+    def _get_lock(self):
+        """قفل سراسری را تنبل می‌سازد (قبل از حلقه‌ی رویداد ساخته نمی‌شود)."""
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
+
+    def _after_op(self, now=None, quick=False):
+        """عملیات تمام شد: مکثِ تصادفیِ بعدی را قرعه بزن.
+
+        quick=True برای کارهای تعاملی است (جوابِ پنل): صف رعایت می‌شود ولی
+        مکثِ بلندِ ۱۵ ثانیه‌ای بعدش نمی‌آید تا کاربر معطل نماند.
+        """
+        now = now if now is not None else time.time()
+        self.last = max(self.last, now)
+        if quick:
+            self.next_gap = self.min_gap
+        elif self.pause_max > self.pause_min:
+            self.next_gap = random.uniform(self.pause_min, self.pause_max)
+        else:
+            self.next_gap = self.pause_min
+
+    @contextlib.asynccontextmanager
+    async def hold(self, kind="other", max_wait=None, quick=False):
+        """یک عملیات API را «دونه‌دونه» اجرا کن.
+
+        ترتیب کار:
+          ۱) قفل سراسری را بگیر → اگر عملیات دیگری در جریان است، **صبر کن تا
+             تمام شود** (نه اینکه هم‌زمان بزنیم)
+          ۲) صبرِ دروازه (مکثِ بعد از کارِ قبلی + بودجه‌ی پنجره + سقف فلود)
+          ۳) عملیات را ثبت کن و `True` بده → کدِ داخل `with` اجرا می‌شود
+          ۴) بعد از پایان، مکثِ بعدی قرعه می‌خورد و قفل آزاد می‌شود
+
+        اگر `max_wait` داده شود و صبرِ لازم از آن بیشتر باشد (مثلاً سقف فلود
+        یا حالت سکوت)، بدون اینکه اصلاً درخواستی زده شود `False` می‌دهد تا
+        مسیرهای غیرضروری بی‌خیال شوند.
+
+        `quick=True` فقط برای کارهای تعاملی (جوابِ پنل) است: صف رعایت می‌شود
+        ولی مکثِ بلندِ بعد از کار نمی‌آید.
+
+        ورودی تودرتو از همان تسک قفل را دوباره نمی‌گیرد (بن‌بست نمی‌شود).
+        """
+        if not self.serialize:
+            # فقط حسابداری، بدون صف
+            self.record(kind)
+            yield True
+            return
+
+        task = asyncio.current_task()
+        if task is not None and self._owner is task:
+            self.record(kind)
+            yield True
+            return
+
+        lock = self._get_lock()
+        t0 = time.time()
+        self.queue_len += 1
+        self.max_queue = max(self.max_queue, self.queue_len)
+        await lock.acquire()
+        self.queue_len -= 1
+        allowed = False
+        try:
+            w = self.wait(kind)
+            if max_wait is None or w <= max_wait:
+                if w > 0:
+                    await asyncio.sleep(w)
+                self.record(kind)
+                self.in_flight += 1
+                self.max_in_flight = max(self.max_in_flight, self.in_flight)
+                self._owner = task
+                allowed = True
+            self.total_wait_sec += time.time() - t0
+        except BaseException:
+            lock.release()
+            raise
+        if not allowed:
+            lock.release()
+        try:
+            yield allowed
+        finally:
+            if allowed:
+                self.in_flight = max(0, self.in_flight - 1)
+                self._owner = None
+                self._after_op(quick=quick)
+                lock.release()
+
+    def penalize(self, sec, kind="other", now=None):
+        """FloodWait خورد → سقف سراسری + بودجه‌ی کمتر + شاید حالت سکوت.
+
+        برمی‌گرداند True اگر این فلود دروازه را به حالت سکوت برده باشد.
+        """
+        now = now if now is not None else time.time()
+        w = max(0.0, float(sec))
+        self.cooldown_until = max(self.cooldown_until, now + w + 2.0)
+        step = max(2.0, self.base_budget * 0.15)
+        self.penalty = min(self.max_penalty, self.penalty + step)
+        self.last_flood = now
+        self.last_decay = now
+        self.last_flood_kind = kind or "other"
+        self.total_floods += 1
+        self.floods = [t for t in self.floods if t > now - self.quiet_window]
+        self.floods.append(now)
+        if len(self.floods) >= self.quiet_floods and self.quiet_until <= now:
+            self.quiet_until = now + self.quiet_for
+            self.quiet_rounds += 1
+            self.last_quiet_reason = (f"{fa(len(self.floods))} فلود در "
+                                      f"{fa(int(self.quiet_window // 60))} دقیقه")
+            return True
+        return False
+
+    def maybe_decay(self, now=None):
+        """هر `decay_sec` بی‌فلودی، یک پله از جریمه‌ی بودجه کم کن."""
+        now = now if now is not None else time.time()
+        if self.penalty <= 0:
+            return False
+        if self.last_flood and now - self.last_flood < self.decay_sec:
+            return False
+        ref = self.last_decay or self.last_flood
+        if ref and now - ref < self.decay_sec:
+            return False
+        self.penalty = max(0.0, self.penalty - max(2.0, self.base_budget * 0.1))
+        self.last_decay = now
+        return True
+
+    def note_msg(self, key, now=None):
+        """یک پیامِ تبادل به این نفر رفت — زمانش را نگه دار (ضدِ تکرار)."""
+        now = now if now is not None else time.time()
+        self.last_msg[str(key)] = now
+        if len(self.last_msg) > 500:
+            cut = now - 3600
+            for k in [k for k, v in self.last_msg.items() if v < cut]:
+                self.last_msg.pop(k, None)
+            while len(self.last_msg) > 500:
+                self.last_msg.pop(next(iter(self.last_msg)), None)
+        return now
+
+    def since_msg(self, key, now=None):
+        """چند ثانیه از آخرین پیام به این نفر گذشته؟ (None = هرگز)"""
+        now = now if now is not None else time.time()
+        t = self.last_msg.get(str(key))
+        return None if not t else max(0.0, now - t)
+
+    def release_quiet(self):
+        """خروج دستی از حالت سکوت (دستور پنل) — جریمه‌ی بودجه می‌ماند."""
+        self.quiet_until = 0.0
+        self.floods = []
+        return True
+
+    def reset(self):
+        """صفر کردن جریمه/سکوت/سقف — فشارِ پنجره دست‌نخورده می‌ماند."""
+        self.penalty = 0.0
+        self.cooldown_until = 0.0
+        self.quiet_until = 0.0
+        self.floods = []
+        self.last_flood = 0.0
+        self.last_decay = 0.0
+        return True
+
+    # ── گزارش ─────────────────────────────────────────
+    def stats(self, now=None):
+        now = now if now is not None else time.time()
+        self._trim(now)
+        hard = self.hard_until(now)
+        return {
+            "on": self.on,
+            "serialize": self.serialize,
+            "in_flight": self.in_flight,
+            "max_in_flight": self.max_in_flight,
+            "queue_len": self.queue_len,
+            "max_queue": self.max_queue,
+            "next_gap": round(self.next_gap, 2),
+            "pause_min": self.pause_min,
+            "pause_max": self.pause_max,
+            "waited_sec": int(self.total_wait_sec),
+            "budget": round(self.budget(), 1),
+            "budget_base": round(self.base_budget, 1),
+            "penalty": round(self.penalty, 1),
+            "load": round(sum(h[1] for h in self.hits), 1),
+            "ops_in_window": len(self.hits),
+            "window_sec": self.window,
+            "min_gap_sec": self.min_gap,
+            "floods_recent": len([t for t in self.floods
+                                  if t > now - self.quiet_window]),
+            "floods_total": self.total_floods,
+            "quiet": bool(now < self.quiet_until),
+            "quiet_left": int(max(0.0, self.quiet_until - now)),
+            "quiet_rounds": self.quiet_rounds,
+            "quiet_reason": self.last_quiet_reason,
+            "cooldown_left": int(max(0.0, self.cooldown_until - now)),
+            "blocked": bool(now < hard),
+            "blocked_left": int(max(0.0, hard - now)),
+            "total_ops": self.total_ops,
+            "total_cost": round(self.total_cost, 1),
+            "last_flood_kind": self.last_flood_kind,
+        }
+
+    def status_text(self, now=None):
+        s = self.stats(now)
+        lines = ["⚙️ دروازه‌ی عملکرد (OpGate)", "━━━━━━━━━━━━━━"]
+        if not s["on"]:
+            lines += ["وضعیت: خاموش — فشار API اندازه‌گیری نمی‌شود",
+                      "روشن کردن: `تبادل دروازه روشن`"]
+            return "\n".join(lines)
+        pct = int(round(100 * s["load"] / s["budget"])) if s["budget"] else 0
+        filled = min(10, max(0, pct // 10))
+        bar = "█" * filled + "░" * (10 - filled)
+        lines += [
+            "وضعیت: روشن",
+            ("اجرا: 🚶 دونه‌دونه — در هر لحظه فقط یک عملیات API"
+             if s["serialize"] else
+             "اجرا: ⚠️ موازی (صف خاموش است) — `تبادل دروازه پشت‌سرهم روشن`"),
+            (f"مکث بعد از هر کار: {s['pause_min']:g}–{s['pause_max']:g} ثانیه"
+             f" (بعدی: {s['next_gap']:g} ثانیه)"),
+            (f"در جریان: {fa(s['in_flight'])} | صف: {fa(s['queue_len'])} | "
+             f"بیشترین هم‌زمانی: {fa(s['max_in_flight'])}"),
+            (f"فشارِ {fa(int(s['window_sec']))} ثانیه‌ی اخیر: {bar} "
+             f"{fa(int(s['load']))} از {fa(int(s['budget']))} واحد ({fa(pct)}٪)"),
+            f"عملیات در پنجره: {fa(s['ops_in_window'])} عدد",
+            f"حداقل فاصله‌ی سراسری: {s['min_gap_sec']:g} ثانیه",
+            (f"جریمه‌ی بودجه: −{fa(int(s['penalty']))} واحد "
+             f"(پایه {fa(int(s['budget_base']))})"),
+            (f"فلودِ {fa(int(self.quiet_window // 60))} دقیقه‌ی اخیر: "
+             f"{fa(s['floods_recent'])} از {fa(self.quiet_floods)} لازم برای سکوت"),
+            (f"فلود از شروع: {fa(s['floods_total'])} | "
+             f"سکوت‌ها: {fa(s['quiet_rounds'])}"),
+        ]
+        if s["quiet"]:
+            lines.append(f"🤫 حالت سکوت: {secs(s['quiet_left'])} مانده — "
+                         "عملیات غیرضروری زده نمی‌شود")
+        elif s["cooldown_left"]:
+            lines.append(f"⏳ سقف فلود: {secs(s['cooldown_left'])} مانده")
+        else:
+            lines.append("🟢 نه سقف فلود فعال است، نه سکوت")
+        lines += [
+            f"مجموع از شروع: {fa(s['total_ops'])} عملیات / "
+            f"{fa(int(s['total_cost']))} واحد",
+            "",
+            "`تبادل دروازه خاموش` / `تبادل دروازه روشن` · "
+            "`تبادل دروازه مکث 1 3` · `تبادل دروازه پشت‌سرهم خاموش` · "
+            "`تبادل دروازه بودجه 60` · `تبادل دروازه ریست`",
+        ]
+        return "\n".join(lines)
+
+
 class Throttle:
     def __init__(self, p):
         self.apply(p)
@@ -1311,6 +1747,19 @@ HELP = """🤖 راهنمای جفج
 تبادل تطبیقی uptime 3 — بعد از چند ساعت کند شود (پیش‌فرض ۳ ساعت)
 تبادل تطبیقی extra 30 10 — اضافه آپ‌تایم (۳۰ ثانیه بعد آستانه + ۱۰ ثانیه هر ساعت)
 
+⚙️ دروازه‌ی عملکرد (OpGate) — همه‌ی کارها دونه‌دونه
+هفت حلقه‌ی موازی (ارسال/تبادل/اسکن/بررسی/گزارش/ریسک/وضعیت) هم‌زمان کار می‌کنند.
+دروازه یک قفل سراسری می‌گذارد: در هر لحظه **فقط یک** عملیات API در جریان است،
+بعد از تمام شدنش یک مکث تصادفی می‌آید و بعد نوبتِ بعدی می‌رسد. ضمناً بودجه‌ی
+«فشارِ کل» را در پنجره‌ی ۶۰ ثانیه‌ای حساب می‌کند (جوین ۳، چک/لفت ۲، ارسال ۱).
+تبادل دروازه — وضعیت (صف، مکث، فشار پنجره، جریمه، فلودها، حالت سکوت)
+تبادل دروازه مکث 1 3 — مکث تصادفی بعد از هر عملیات (پیش‌فرض ۰.۶ تا ۱.۸ ثانیه)
+تبادل دروازه پشت‌سرهم خاموش / روشن — خاموش/روشن کردن صفِ تک‌نفره (پیش‌فرض روشن)
+تبادل دروازه خاموش / تبادل دروازه روشن — غیرفعال/فعال کردن کلِ دروازه
+تبادل دروازه بودجه 60 — چند واحد فشار در دقیقه مجاز باشد (پیش‌فرض ۴۰)
+تبادل دروازه فاصله 0.8 — کفِ فاصله‌ی بین دو عملیات (پیش‌فرض ۰.۴ ثانیه)
+تبادل دروازه ریست — صفر کردن جریمه/سقف فلود/سکوت
+
 📊 گزارش خصوصی تبادل
 تبادل گزارش — ورود به منوی گزارش تبادل
 تنظیم گزارش روشن — فعال‌کردن گزارش لحظه‌ای در PV
@@ -1383,6 +1832,8 @@ class Engine:
         self.join_thr = Throttle({"min_gap_sec": x["min_join_gap_sec"],
                                   "max_gap_sec": x["max_join_gap_sec"],
                                   "max_per_hour": 0})
+        # دروازه‌ی عملکرد سراسری: بودجه‌ی فشار API برای همه‌ی مسیرها
+        self.op_gate = OpGate(self.st["opgate"])
         self.ai = AI()
         self.lim = Limits()
         self.apply_limits()
@@ -1428,6 +1879,7 @@ class Engine:
     def reload(self, tier):
         self.thr[tier].apply(self.st.prof(tier))
         self.cyc[tier].apply(self.st.prof(tier))
+        self.op_gate.apply(self.st["opgate"])
         self.st.save()
         self.apply_limits()
 
@@ -1930,6 +2382,26 @@ class Engine:
                 "hard_edge": bool(_hedge),
                 "hard_score": _hmeta.get("score", 0),
             })
+            # دروازه‌ی عملکرد: فشارِ زنده‌ی API (داشبورد هم همین را می‌خواند)
+            try:
+                _og = self.op_gate.stats()
+                d["op_gate"] = {
+                    "on": bool(_og["on"]),
+                    "serialize": bool(_og["serialize"]),
+                    "in_flight": _og["in_flight"],
+                    "max_in_flight": _og["max_in_flight"],
+                    "queue": _og["queue_len"],
+                    "next_gap": _og["next_gap"],
+                    "load": _og["load"],
+                    "budget": _og["budget"],
+                    "ops_in_window": _og["ops_in_window"],
+                    "blocked": bool(_og["blocked"]),
+                    "quiet": bool(_og["quiet"]),
+                    "floods_recent": _og["floods_recent"],
+                    "floods_total": _og["floods_total"],
+                }
+            except Exception:
+                pass
             if extra:
                 d.update(extra)
             tmp = STATUS_FILE + ".tmp"
@@ -2107,6 +2579,100 @@ class Engine:
             "`تبادل فاصله ۳۰ ۶۰` (تنظیم پایه)",
             "`تبادل تطبیقی` (نمایش همین صفحه)",
         ])
+
+    def op_gate_cmd(self, arg=""):
+        """«تبادل دروازه …» — وضعیت/روشن/خاموش/بودجه/ریستِ دروازه‌ی عملکرد."""
+        g = self.op_gate
+        raw = (arg or "").strip()
+        norm = re.sub(r"\s+", " ", raw.replace("\u200c", " ")).strip()
+        if not norm:
+            return g.status_text()
+        parts = norm.split(None, 1)
+        sub = parts[0].lower()
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        # عبارت‌های چندکلمه‌ای — نیم‌فاصله‌ها به فاصله تبدیل شده‌اند، پس باید
+        # قبل از split تشخیص داده شوند («دروازه پشت‌سرهم خاموش»).
+        for phrase, canonical in (("پشت سرهم", "serialize"),
+                                  ("دونه دونه", "serialize"),
+                                  ("دونه یکی", "serialize"),
+                                  ("صف تک نفره", "serialize"),
+                                  ("حالت سکوت", "quiet")):
+            if norm == phrase or norm.startswith(phrase + " "):
+                sub = canonical
+                rest = norm[len(phrase):].strip()
+                break
+        if sub in ("on", "روشن", "فعال"):
+            g.on = True
+            self.st["opgate"]["on"] = True
+            self.st.save()
+            return "✅ دروازه‌ی عملکرد روشن شد.\n" + g.status_text()
+        if sub in ("off", "خاموش", "غیرفعال"):
+            g.on = False
+            self.st["opgate"]["on"] = False
+            self.st.save()
+            return ("⚠️ دروازه‌ی عملکرد خاموش شد — فشار API دیگر اندازه‌گیری "
+                    "نمی‌شود و FloodWait محتمل‌تر است.\n" + g.status_text())
+        if sub in ("reset", "ریست", "بازنشانی"):
+            g.reset()
+            return "♻️ جریمه، سقف فلود و سکوت بازنشانی شد.\n" + g.status_text()
+        if sub in ("quiet", "سکوت", "ادامه"):
+            g.release_quiet()
+            return "▶️ حالت سکوت لغو شد؛ کار ادامه پیدا می‌کند.\n" + g.status_text()
+        if sub in ("pause", "مکث", "وقفه"):
+            nums = str(rest).translate(EN).replace(",", " ").split()
+            try:
+                lo = float(nums[0])
+                hi = float(nums[1]) if len(nums) > 1 else lo + 1.0
+            except Exception:
+                return ("عدد نامعتبر. مثال: `تبادل دروازه مکث 1 3`\n"
+                        + g.status_text())
+            lo = max(0.0, min(30.0, lo))
+            hi = max(lo, min(60.0, hi))
+            self.st["opgate"]["pause_min_sec"] = lo
+            self.st["opgate"]["pause_max_sec"] = hi
+            g.apply(self.st["opgate"])
+            self.st.save()
+            return (f"✅ مکث بعد از هر عملیات روی {lo:g} تا {hi:g} ثانیه "
+                    "تنظیم شد.\n" + g.status_text())
+        if sub in ("serialize", "پشت‌سرهم", "پشت سرهم", "دونه", "دونه دونه",
+                   "دونه‌دونه", "صف"):
+            if rest in ("off", "خاموش", "۰", "0"):
+                g.serialize = False
+                self.st["opgate"]["serialize"] = False
+                self.st.save()
+                return ("⚠️ صفِ تک‌نفره خاموش شد — عملیات دوباره می‌توانند "
+                        "هم‌زمان زده شوند (FloodWait محتمل‌تر).\n"
+                        + g.status_text())
+            g.serialize = True
+            self.st["opgate"]["serialize"] = True
+            self.st.save()
+            return ("✅ صفِ تک‌نفره روشن شد — عملیات یکی‌یکی و با مکث انجام "
+                    "می‌شوند.\n" + g.status_text())
+        if sub in ("budget", "بودجه", "سقف"):
+            try:
+                v = int(num(rest))
+            except Exception:
+                return ("عدد نامعتبر. مثال: `تبادل دروازه بودجه 60`"
+                        "\n" + g.status_text())
+            v = max(8, min(600, v))
+            self.st["opgate"]["budget_per_min"] = v
+            g.apply(self.st["opgate"])
+            self.st.save()
+            return (f"✅ بودجه‌ی پنجره روی {fa(v)} واحد در دقیقه تنظیم شد.\n"
+                    + g.status_text())
+        if sub in ("gap", "فاصله"):
+            try:
+                v = float(str(rest).translate(EN).strip())
+            except Exception:
+                return ("عدد نامعتبر. مثال: `تبادل دروازه فاصله 0.8`"
+                        "\n" + g.status_text())
+            v = max(0.0, min(10.0, v))
+            self.st["opgate"]["min_gap_sec"] = v
+            g.apply(self.st["opgate"])
+            self.st.save()
+            return (f"✅ حداقل فاصله‌ی سراسری روی {v:g} ثانیه تنظیم شد.\n"
+                    + g.status_text())
+        return g.status_text()
 
     def permanent_check_status_text(self):
         x = self.ex_cfg()
@@ -2462,6 +3028,10 @@ class Engine:
             ("گروه ها", "groups"),
             ("پیش قدم", "go"),
             ("پیشقدم", "go"),
+            ("دروازه عملکرد", "opgate"),
+            ("دروازه", "opgate"),
+            ("گیت عملکرد", "opgate"),
+            ("پرفورمنس", "opgate"),
             ("تطبیقی", "adaptive"),
             ("حالت تطبیقی", "adaptive"),
             ("جوین تطبیقی", "adaptive"),
@@ -2523,6 +3093,9 @@ class Engine:
             "خلاصه": "report_now",
             "فاصله تبادل": "gap", "زمان تبادل": "gap",
             "تطبیقی": "adaptive", "حالت تطبیقی": "adaptive", "جوین تطبیقی": "adaptive",
+            "دروازه": "opgate", "دروازه عملکرد": "opgate", "گیت عملکرد": "opgate",
+            "عملکرد": "opgate", "فشار": "opgate", "پرفورمنس": "opgate",
+            "opgate": "opgate", "op_gate": "opgate",
             "بیا": "come", "پیام بیا": "come", "زمان بیا": "cometime",
             "زمان جواب": "replytime", "زمان پاسخ مستقیم": "replytime",
             "replytime": "replytime", "reply_time": "replytime", "reply_delay": "replytime",
@@ -2540,6 +3113,10 @@ class Engine:
 
         if not sub:
             return self.exchange_text()
+
+        # ── دروازه‌ی عملکرد (OpGate): وضعیت/روشن/خاموش/بودجه/ریست ──
+        if sub == "opgate":
+            return self.op_gate_cmd(rest)
 
         if sub in ("on", "روشن"):
             if not self.lim.allowed("exchange"):
@@ -3311,6 +3888,22 @@ class Engine:
             perm_label = f"تا {fa(_perm_max)} ساعت"
         else:
             perm_label = "خاموش"
+        # برچسب دروازه‌ی عملکرد — فشارِ زنده‌ی API در پنجره‌ی غلتان
+        try:
+            _og = self.op_gate.stats()
+            _opgate_line = (
+                "دروازه‌ی عملکرد: 🚶 دونه‌دونه"
+                if _og["serialize"] else "دروازه‌ی عملکرد: ⚠️ موازی")
+            _opgate_line += (
+                f" · مکث {_og['pause_min']:g}–{_og['pause_max']:g}ث"
+                f" · فشار {fa(int(_og['load']))} از {fa(int(_og['budget']))}"
+                + (" — 🤫 سکوت فعال" if _og["quiet"]
+                   else (" — ⏳ سقف فلود" if _og["blocked"] else ""))
+                + "   `تبادل دروازه`")
+            if not _og["on"]:
+                _opgate_line = "دروازه‌ی عملکرد: خاموش   `تبادل دروازه روشن`"
+        except Exception:
+            _opgate_line = "دروازه‌ی عملکرد: —   `تبادل دروازه`"
         lines = [
             "🔁 تبادل",
             "━━━━━━━━━━━━━━",
@@ -3329,6 +3922,7 @@ class Engine:
             f"پاسخ بعد از Join واقعی: {fa(x.get('response_delay_sec', 15))} ثانیه",
             f"انتخاب پیام: مورد {fa(x.get('scan_pick', 2) or 2)} از جدیدترین‌ها",
             f"اسکن گروه: هر {secs(max(30, int(x.get('scan_every_sec', 30) or 30)))}",
+            _opgate_line,
             f"ضد اسپم چندگروهی: {'فعال — بنر اول سر ' + fa(x.get('scan_every_sec', 30)) + ' ثانیه، بقیه ' + fa(x.get('scan_jitter_min_sec', 5)) + '–' + fa(x.get('scan_jitter_max_sec', 15)) + ' ثانیه تصادفی بعد' if len(groups) >= 2 else 'غیرفعال (تک گروه) — وقتی ۲ گروه بذاری خودکار فعال میشه'}   `تبادل اسکن تصادفی`",
             f"سن مجاز لینک: حداکثر {fa(max(1, int(x.get('scan_max_age_sec', 300) or 300)) // 60)} دقیقه",
             f"گروه‌های ثبت‌شده: {fa(len(groups))}",
@@ -3359,6 +3953,7 @@ class Engine:
             "گزارش خلاصه همین حالا: `گزارش خلاصه`",
             "فاصله Join: `تبادل فاصله`",
             "تطبیقی هوشمند: `تبادل تطبیقی` (Flood + آپ‌تایم)",
+            "دروازه‌ی عملکرد: `تبادل دروازه` (فشار API + حالت سکوت)",
             "نگهبانی عضویت: `تبادل دائمی` (سقف ساعت + وضعیت)",
             "بررسی عضویت: `تبادل بررسی ۱۵ ۳۰`",
             "اخطار لفت: `تبادل اخطار ۲` (پیش‌فرض ۲ نبودنِ تأییدشده)",
@@ -4516,7 +5111,11 @@ async def connect_and_run(eng, creds):
 
     async def note(text):
         try:
-            _track_own(await client.send_message("me", text, link_preview=False))
+            # گزارش‌های PV هم یک عملیات API هستند: در همان صفِ تک‌نفره
+            # می‌روند (حساب می‌شوند + مکث)، ولی هرگز به‌خاطر شلوغیِ صف
+            # حذف نمی‌شوند — صاحب‌حساب باید خبرها را ببیند.
+            async with eng.op_gate.hold("note"):
+                _track_own(await client.send_message("me", text, link_preview=False))
         except Exception:
             pass
 
@@ -4616,15 +5215,18 @@ async def connect_and_run(eng, creds):
         h = _to_html(txt)
         # همیشه به Saved Messages (me) برمی‌گردد تا پاسخ، مستقل از محلِ پیام،
         # حتماً در جایی که ربات کنترلِ آن را دارد دیده شود.
+        # دروازه‌ی عملکرد: پاسخِ پنل هم پشت بقیه‌ی عملیات API صف می‌ایستد.
         try:
-            _track_own(await client.send_message("me", h, parse_mode="html",
-                                                 link_preview=False))
+            async with eng.op_gate.hold("send", quick=True):
+                _track_own(await client.send_message("me", h, parse_mode="html",
+                                                     link_preview=False))
             return
         except Exception as e:
             eng.log("warn", "say_html", f"{type(e).__name__}: {str(e)[:120]}")
         # اگر HTML رد شد، با متنِ خام تلاش کن.
         try:
-            _track_own(await client.send_message("me", txt, link_preview=False))
+            async with eng.op_gate.hold("send", quick=True):
+                _track_own(await client.send_message("me", txt, link_preview=False))
             return
         except Exception as e:
             eng.log("error", "say", f"{type(e).__name__}: {str(e)[:120]}")
@@ -4876,7 +5478,13 @@ async def connect_and_run(eng, creds):
             eng.log("info", "dry_run_send", f"#{qid} → {tgt}")
             return
         try:
-            sent = await client.send_message(tgt, text, link_preview=False)
+            # دروازه‌ی عملکرد: این ارسال هم «دونه‌دونه» می‌رود — پشت بقیه‌ی
+            # عملیات API صف می‌ایستد و بعد از هر کار مکث می‌کند.
+            async with eng.op_gate.hold("send") as allowed:
+                if not allowed:
+                    eng.db.mark_failed(qid, "gate busy", retry_at=time.time() + 30)
+                    return
+                sent = await client.send_message(tgt, text, link_preview=False)
             mid = getattr(sent, "id", None)
             eng.db.mark_sent(qid, mid)
             eng.thr[tier].record()
@@ -4884,6 +5492,7 @@ async def connect_and_run(eng, creds):
         except FloodWaitError as e:
             w = getattr(e, "seconds", 60)
             eng.thr[tier].penalize(w)
+            eng.op_gate.penalize(w, "send")
             eng.db.mark_failed(qid, f"FloodWait {w}s", retry_at=time.time() + w + 2)
             eng.log("warn", "flood", f"#{qid}: {w}s")
         except (ChatWriteForbiddenError, ChannelPrivateError,
@@ -4916,38 +5525,47 @@ async def connect_and_run(eng, creds):
             return None
         saw_false = False
         for ch in chans:
-            # پاس‌گاه سراسری: فلود بلند → درخواست نزن اصلاً؛ کوتاه → صبر کن
+            # پاس‌گاه ضد-فلودِ چک (CheckGate): فلود بلند → درخواست نزن اصلاً؛
+            # کوتاه → صبر کن. عمداً بیرونِ صفِ تک‌نفره است تا خوابِ بلندش
+            # بقیه‌ی عملیات (جوین/ارسال) را پشت قفل نگه ندارد.
             w = check_gate.wait()
             if w > 45:
                 return None
             if w > 0:
                 await asyncio.sleep(w)
             check_gate.record()
-            try:
-                await client(GetParticipantRequest(ch, user_id))
-                return True
-            except UserNotParticipantError:
-                saw_false = True
-            except FloodWaitError as e:
-                w = getattr(e, "seconds", 60)
-                check_gate.penalize(w)
-                # فیکس: فلودِ «بررسی عضویت» ربطی به ظرفیت ارسال ندارد؛
-                # قبلاً تروتیل ارسال هم جریمه می‌شد و کل ربات فریز می‌شد
-                # (نه پیام می‌رفت نه لفت انجام می‌شد). فقط گیت چک می‌ایستد.
-                eng.db.log("warn", "ex_check_flood", f"{ch}: {w}s")
-                # فلودِ چک یعنی کل مسیر بررسی دارد قیچی می‌شود — به
-                # صاحب‌حساب بگو (حداکثر هر ۱۰ دقیقه یک‌بار).
-                nowf = int(time.time())
-                if w >= 60 and nowf - int(_warn_check_flood["last"] or 0) > 600:
-                    _warn_check_flood["last"] = nowf
-                    await note(f"⏳ FloodWait {secs(w)} روی بررسی عضویت — "
-                               "چک‌ها تا پایانش متوقف می‌شوند و بعد خودکار "
-                               "ادامه می‌دهند. اگر زیاد تکرار شد، «تبادل بررسی» "
-                               "را بلندتر بگذار یا تعداد تبادل‌های فعال را کم کن.")
-                return None
-            except Exception as e:
-                eng.log("warn", "ex_check", f"{ch}: {type(e).__name__}: {e}")
-                return None
+            # دروازه‌ی عملکرد: «دونه‌دونه». اگر عملیات دیگری در جریان است،
+            # اول آن تمام می‌شود، مکثش می‌گذرد، بعد این چک زده می‌شود.
+            # (چک کارِ غیرضروری است: اگر صف/سقف بیش از ۴۵ ثانیه شد، بی‌خیال.)
+            async with eng.op_gate.hold("check", max_wait=45) as allowed:
+                if not allowed:
+                    return None
+                try:
+                    await client(GetParticipantRequest(ch, user_id))
+                    return True
+                except UserNotParticipantError:
+                    saw_false = True
+                except FloodWaitError as e:
+                    w = getattr(e, "seconds", 60)
+                    check_gate.penalize(w)
+                    eng.op_gate.penalize(w, "check")
+                    # فیکس: فلودِ «بررسی عضویت» ربطی به ظرفیت ارسال ندارد؛
+                    # قبلاً تروتیل ارسال هم جریمه می‌شد و کل ربات فریز می‌شد
+                    # (نه پیام می‌رفت نه لفت انجام می‌شد). فقط گیت چک می‌ایستد.
+                    eng.db.log("warn", "ex_check_flood", f"{ch}: {w}s")
+                    # فلودِ چک یعنی کل مسیر بررسی دارد قیچی می‌شود — به
+                    # صاحب‌حساب بگو (حداکثر هر ۱۰ دقیقه یک‌بار).
+                    nowf = int(time.time())
+                    if w >= 60 and nowf - int(_warn_check_flood["last"] or 0) > 600:
+                        _warn_check_flood["last"] = nowf
+                        await note(f"⏳ FloodWait {secs(w)} روی بررسی عضویت — "
+                                   "چک‌ها تا پایانش متوقف می‌شوند و بعد خودکار "
+                                   "ادامه می‌دهند. اگر زیاد تکرار شد، «تبادل بررسی» "
+                                   "را بلندتر بگذار یا تعداد تبادل‌های فعال را کم کن.")
+                    return None
+                except Exception as e:
+                    eng.log("warn", "ex_check", f"{ch}: {type(e).__name__}: {e}")
+                    return None
         return False if saw_false else None
 
     async def confirm_peer_membership(user_id, fast=False):
@@ -4969,71 +5587,79 @@ async def connect_and_run(eng, creds):
         """جوین به کانال. برمی‌گرداند (موفق, پیام, عنوان)"""
         if DRY_RUN:
             return True, "joined", "DRY_RUN"
-        try:
-            if is_invite(link):
-                upd = await client(ImportChatInviteRequest(invite_hash(link)))
-                title = ""
-                chats = getattr(upd, "chats", None)
-                if chats:
-                    title = getattr(chats[0], "title", "")
-                return True, "joined", title
-            ent = await client.get_entity(link)
-            await client(JoinChannelRequest(ent))
-            return True, "joined", getattr(ent, "title", "")
-
-        except UserAlreadyParticipantError:
-            return True, "already", ""
-        except InviteRequestSentError:
-            return False, "درخواست عضویت فرستاده شد — منتظر تأیید ادمین", ""
-        except (InviteHashExpiredError, InviteHashInvalidError):
-            return False, "لینک منقضی یا نامعتبر است", ""
-        except UsernameNotOccupiedError:
-            return False, "این یوزرنیم وجود ندارد", ""
-        except ChannelPrivateError:
-            return False, "کانال خصوصی است یا بن شده‌ای", ""
-        except ChannelsTooMuchError:
-            return False, "تو حداکثر تعداد کانال ممکن هستی — چندتا لفت بده", ""
-        except FloodWaitError as e:
-            w = getattr(e, "seconds", 60)
-            eng.join_thr.penalize(w)
-            eng.db.log("warn", "ex_flood", f"join {link}: {w}s")
+        # دروازه‌ی عملکرد: «دونه‌دونه» — جوین گران‌ترین عملیات است (۳ واحد).
+        # اول صف می‌ایستد: اگر عملیات دیگری در جریان است، تا تمام شدنش صبر
+        # می‌کند، مکثِ بعدش می‌گذرد، بعد این جوین زده می‌شود.
+        async with eng.op_gate.hold("join"):
             try:
-                eng.adaptive_on_flood(w)
-            except Exception:
-                pass
-            if w >= 300:
-                # حساب در جریمه است؛ چک‌های عضویت بار اضافه‌اند — گیت چک هم آرام بگیرد
+                if is_invite(link):
+                    upd = await client(ImportChatInviteRequest(invite_hash(link)))
+                    title = ""
+                    chats = getattr(upd, "chats", None)
+                    if chats:
+                        title = getattr(chats[0], "title", "")
+                    return True, "joined", title
+                ent = await client.get_entity(link)
+                await client(JoinChannelRequest(ent))
+                return True, "joined", getattr(ent, "title", "")
+
+            except UserAlreadyParticipantError:
+                return True, "already", ""
+            except InviteRequestSentError:
+                return False, "درخواست عضویت فرستاده شد — منتظر تأیید ادمین", ""
+            except (InviteHashExpiredError, InviteHashInvalidError):
+                return False, "لینک منقضی یا نامعتبر است", ""
+            except UsernameNotOccupiedError:
+                return False, "این یوزرنیم وجود ندارد", ""
+            except ChannelPrivateError:
+                return False, "کانال خصوصی است یا بن شده‌ای", ""
+            except ChannelsTooMuchError:
+                return False, "تو حداکثر تعداد کانال ممکن هستی — چندتا لفت بده", ""
+            except FloodWaitError as e:
+                w = getattr(e, "seconds", 60)
+                eng.join_thr.penalize(w)
+                eng.op_gate.penalize(w, "join")
+                eng.db.log("warn", "ex_flood", f"join {link}: {w}s")
                 try:
-                    check_gate.penalize(min(w, 1800))
+                    eng.adaptive_on_flood(w)
                 except Exception:
                     pass
-            return False, f"FloodWait {w}s", ""
-        except Exception as e:
-            return False, f"{type(e).__name__}: {e}", ""
+                if w >= 300:
+                    # حساب در جریمه است؛ چک‌های عضویت بار اضافه‌اند — گیت چک هم آرام بگیرد
+                    try:
+                        check_gate.penalize(min(w, 1800))
+                    except Exception:
+                        pass
+                return False, f"FloodWait {w}s", ""
+            except Exception as e:
+                return False, f"{type(e).__name__}: {e}", ""
 
     async def leave_link(link):
         if DRY_RUN:
             return True, ""
-        try:
-            ent = await client.get_entity(link)
-            await client(LeaveChannelRequest(ent))
-            return True, ""
-        except FloodWaitError as e:
-            w = getattr(e, "seconds", 60)
-            eng.join_thr.penalize(w)
-            eng.db.log("warn", "ex_flood", f"leave {link}: {w}s")
+        # دروازه‌ی عملکرد: لفت هم «دونه‌دونه» (رزول + درخواست نوشتنی، ۲ واحد)
+        async with eng.op_gate.hold("leave"):
             try:
-                eng.adaptive_on_flood(w)
-            except Exception:
-                pass
-            if w >= 300:
+                ent = await client.get_entity(link)
+                await client(LeaveChannelRequest(ent))
+                return True, ""
+            except FloodWaitError as e:
+                w = getattr(e, "seconds", 60)
+                eng.join_thr.penalize(w)
+                eng.op_gate.penalize(w, "leave")
+                eng.db.log("warn", "ex_flood", f"leave {link}: {w}s")
                 try:
-                    check_gate.penalize(min(w, 1800))
+                    eng.adaptive_on_flood(w)
                 except Exception:
                     pass
-            return False, f"FloodWait {w}s"
-        except Exception as e:
-            return False, f"{type(e).__name__}: {e}"
+                if w >= 300:
+                    try:
+                        check_gate.penalize(min(w, 1800))
+                    except Exception:
+                        pass
+                return False, f"FloodWait {w}s"
+            except Exception as e:
+                return False, f"{type(e).__name__}: {e}"
 
     async def reply_joined(rec):
         """متن «جوین شدم» کاربر را روی پیام خود طرف ریپلای می‌کند.
@@ -5065,11 +5691,26 @@ async def connect_and_run(eng, creds):
             await asyncio.sleep(delay)
         try:
             if not DRY_RUN:
-                await client.send_message(chat, body, reply_to=mid, link_preview=False)
+                # دروازه‌ی عملکرد: «دونه‌دونه» — اگر عملیات دیگری در جریان است
+                # اول تمام می‌شود، مکثش می‌گذرد، بعد این پیام می‌رود.
+                # اگر صف/سقف بیش از ۳ دقیقه شد، این دور بی‌خیال (بعداً
+                # دوباره تلاش می‌شود؛ replied صفر می‌ماند).
+                async with eng.op_gate.hold("send", max_wait=180) as allowed:
+                    if not allowed:
+                        eng.log("warn", "ex_reply",
+                                f"#{rec['id']}: صف/سقف فعال — بعداً دوباره")
+                        return False
+                    await client.send_message(chat, body, reply_to=mid,
+                                              link_preview=False)
             eng.db.ex_set(rec["id"], replied=1)
             eng.log("ok", "ex_reply" if not DRY_RUN else "dry_run_reply",
                     f"#{rec['id']}")
             return True
+        except FloodWaitError as e:
+            w = getattr(e, "seconds", 60)
+            eng.op_gate.penalize(w, "send")
+            eng.log("warn", "ex_reply", f"#{rec['id']}: FloodWait {w}s")
+            return False
         except Exception as e:
             eng.log("warn", "ex_reply", f"#{rec['id']}: {type(e).__name__}: {e}")
             return False
@@ -5170,6 +5811,38 @@ async def connect_and_run(eng, creds):
             return max(1, min(3600, lo))
         return random.randint(lo, hi)
 
+    def recently_messaged(rec):
+        """چند ثانیه از آخرین پیامِ تبادل به همین نفر گذشته است؟ (None = هیچ)
+
+        برای این است که دو مسیر مختلف (رویدادِ ریپلای، حلقه‌ی یادآوری، چک
+        نگهبانی) به یک نفر پشت‌سرهم «نیومدی» نگویند.
+        """
+        key = str(rec.get("peer_id") or rec.get("link") or "")
+        if not key:
+            return None
+        return eng.op_gate.since_msg(key)
+
+    async def say_not_joined(rec):
+        """«نیومدی» با محافظِ ضدِ تکرار.
+
+        برمی‌گرداند:
+          True  → پیام رفت
+          False → تلاش ناموفق (مثل قبل، بعد از ۳ بار سراغ لفت می‌رویم)
+          None  → عمداً رد شد چون همین تازگی پیام گرفته (تلاش ناموفق نیست)
+        """
+        gap = max(5, int(eng.ex_cfg().get("reminder_min_sec", 20) or 20))
+        ago = recently_messaged(rec)
+        if ago is not None and ago < gap:
+            eng.log("info", "ex_reminder_skip",
+                    f"#{rec.get('id')}: {int(ago)}s پیش پیام گرفته — رد شد")
+            return None
+        out = await send_not_joined_reminder(rec)
+        if out:
+            key = str(rec.get("peer_id") or rec.get("link") or "")
+            if key:
+                eng.op_gate.note_msg(key)
+        return out
+
     async def send_not_joined_reminder(rec):
         """متن msg_no را روی پیام اصلی می‌فرستد.
         - اگر متن سفارشی msg_no ثبت شده باشد: فقط همان متن می‌رود،
@@ -5201,8 +5874,20 @@ async def connect_and_run(eng, creds):
             return False
         try:
             if not DRY_RUN:
-                await client.send_message(chat, body, reply_to=mid, link_preview=False)
+                # دروازه‌ی عملکرد: «نیومدی» هم یک ارسال واقعی است — دونه‌دونه
+                async with eng.op_gate.hold("send", max_wait=180) as allowed:
+                    if not allowed:
+                        eng.log("warn", "ex_reminder",
+                                f"#{rec['id']}: صف/سقف فعال — بعداً دوباره")
+                        return False
+                    await client.send_message(chat, body, reply_to=mid,
+                                              link_preview=False)
             return True
+        except FloodWaitError as e:
+            w = getattr(e, "seconds", 60)
+            eng.op_gate.penalize(w, "send")
+            eng.log("warn", "ex_reminder", f"#{rec['id']}: FloodWait {w}s")
+            return False
         except Exception as e:
             eng.log("warn", "ex_reminder", f"#{rec['id']}: {type(e).__name__}: {e}")
             return False
@@ -5240,26 +5925,30 @@ async def connect_and_run(eng, creds):
 
         # ۲) پیام‌های قبلی همین شخص در همین گروه
         try:
-            async for msg in client.iter_messages(chat_id, from_user=sender.id,
-                                                  limit=40):
-                if msg.id == event.id or not msg.raw_text:
-                    continue
-                got = pick(extract_links(msg.raw_text))
-                if got:
-                    return got, "از پیام‌های قبلی‌اش"
+            # دروازه‌ی عملکرد: این هم یک درخواست API است (دونه‌دونه)
+            async with eng.op_gate.hold("resolve"):
+                async for msg in client.iter_messages(chat_id, from_user=sender.id,
+                                                      limit=40):
+                    if msg.id == event.id or not msg.raw_text:
+                        continue
+                    got = pick(extract_links(msg.raw_text))
+                    if got:
+                        return got, "از پیام‌های قبلی‌اش"
         except Exception as e:
             eng.log("warn", "ex_scan", f"{type(e).__name__}: {e}")
 
         # ۳) کانال شخصی روی پروفایل
         try:
             from telethon.tl.functions.users import GetFullUserRequest
-            full = await client(GetFullUserRequest(sender.id))
-            pcid = getattr(full.full_user, "personal_channel_id", None)
-            if pcid:
-                ent = await client.get_entity(pcid)
-                u = getattr(ent, "username", None)
-                if u and u.lower() not in mine:
-                    return "@" + u, "از پروفایلش"
+            # دروازه‌ی عملکرد: دونه‌دونه (رزول پروفایل + گرفتن موجودیت)
+            async with eng.op_gate.hold("resolve"):
+                full = await client(GetFullUserRequest(sender.id))
+                pcid = getattr(full.full_user, "personal_channel_id", None)
+                if pcid:
+                    ent = await client.get_entity(pcid)
+                    u = getattr(ent, "username", None)
+                    if u and u.lower() not in mine:
+                        return "@" + u, "از پروفایلش"
         except Exception:
             pass
 
@@ -5381,10 +6070,35 @@ async def connect_and_run(eng, creds):
             # ارسال یک تأخیر انسانی ۵–۱۸ ثانیه می‌گیرند تا شکل رباتی نداشته باشد.
             # پیام موفق (msg_ok/msg_come) مسیر خودش را دارد (reply_joined با
             # بازه‌ی ۱۱–۴۸ ثانیه) و از این تأخیر عبور نمی‌کند.
+            # ضدِ تکرار: اگر همین تازگی «نیومدی» گرفته (مثلاً حلقه‌ی
+            # یادآوری چند ثانیه پیش فرستاده)، همان متن را دوباره نمی‌گوییم.
+            # این همان «دو تا پیام پشت‌سرهم» است که از دو مسیرِ مختلف می‌آمد.
+            if used == "msg_no":
+                try:
+                    _gap = max(5, int(x.get("reminder_min_sec", 20) or 20))
+                    _ago = eng.op_gate.since_msg(
+                        str(getattr(sender, "id", 0) or 0))
+                    if _ago is not None and _ago < _gap:
+                        eng.log("info", "ex_reply_skip",
+                                f"{sender_name}: {int(_ago)}s پیش «نیومدی» "
+                                "گرفته — تکرار نمی‌شود")
+                        return False
+                except Exception:
+                    pass
             if key in ("msg_no", "msg_wait", "msg_nolink"):
                 await asyncio.sleep(reply_delay_seconds())
             try:
-                await event.reply(t)
+                # دروازه‌ی عملکرد: پاسخِ مستقیم رویداد هم دونه‌دونه می‌رود
+                async with eng.op_gate.hold("send"):
+                    await event.reply(t)
+                # همین پیام هم در سابقه‌ی «آخرین پیام به این نفر» ثبت می‌شود
+                # تا حلقه‌ی یادآوری بلافاصله یک «نیومدی» دیگر نفرستد.
+                if key in ("msg_no", "msg_wait", "msg_nolink"):
+                    try:
+                        eng.op_gate.note_msg(str(getattr(sender, "id", 0)
+                                               or (rec or {}).get("link") or ""))
+                    except Exception:
+                        pass
                 eng.log("info", "ex_reply_attempt", f"{sender_name} [{used}]")
                 # پرچم replied=1 تا همین پیام دوباره ارسال نشود (هر شخص فقط یک بار)
                 # برای پیام‌های مستقیم رویداد ضروری است.
@@ -5606,74 +6320,76 @@ async def connect_and_run(eng, creds):
                 # پیش‌فرض مورد ۱ یعنی تازه‌ترین لینک؛ اگر وجود نداشت،
                 # آخرین پیام معتبر انتخاب می‌شود.
                 pick = max(1, int(x.get("scan_pick", 1) or 1))
-                async for msg in client.iter_messages(g, limit=x["scan_limit"]):
-                    if not msg:
-                        continue
-                    msg_id = int(getattr(msg, "id", 0) or 0)
-                    newest = max(newest, msg_id)
-                    # پیام‌هایی که قبلاً تا این شناسه دیده شده‌اند، دوباره
-                    # کاندید Join نشوند؛ فقط پیام جدید را بررسی کن.
-                    if msg_id <= previous:
-                        continue
-                    if msg.out:
-                        continue
-                    msg_date = getattr(msg, "date", None)
-                    if msg_date is not None:
+                async with eng.op_gate.hold("scan"):
+                    async for msg in client.iter_messages(g, limit=x["scan_limit"]):
+                        if not msg:
+                            continue
+                        msg_id = int(getattr(msg, "id", 0) or 0)
+                        newest = max(newest, msg_id)
+                        # پیام‌هایی که قبلاً تا این شناسه دیده شده‌اند، دوباره
+                        # کاندید Join نشوند؛ فقط پیام جدید را بررسی کن.
+                        if msg_id <= previous:
+                            continue
+                        if msg.out:
+                            continue
+                        msg_date = getattr(msg, "date", None)
+                        if msg_date is not None:
+                            try:
+                                age = scan_now - msg_date.timestamp()
+                                if age > max_age:
+                                    continue
+                            except Exception:
+                                pass
+
+                        sender = None
                         try:
-                            age = scan_now - msg_date.timestamp()
-                            if age > max_age:
-                                continue
+                            sender = await msg.get_sender()
                         except Exception:
                             pass
+                        if not sender or getattr(sender, "bot", False):
+                            continue
+                        if getattr(sender, "id", 0) == eng.my_id:
+                            continue
 
-                    sender = None
-                    try:
-                        sender = await msg.get_sender()
-                    except Exception:
-                        pass
-                    if not sender or getattr(sender, "bot", False):
-                        continue
-                    if getattr(sender, "id", 0) == eng.my_id:
-                        continue
+                        links = [l for l in extract_links(msg.raw_text or "")
+                                 if l.lstrip("@").lower() not in mine]
+                        if not links:
+                            continue
+                        candidates.append((msg, sender, links[0]))
+                        if len(candidates) >= pick:
+                            break
 
-                    links = [l for l in extract_links(msg.raw_text or "")
-                             if l.lstrip("@").lower() not in mine]
-                    if not links:
-                        continue
-                    candidates.append((msg, sender, links[0]))
-                    if len(candidates) >= pick:
-                        break
-
-                if candidates:
-                    selected_index = min(pick, len(candidates))
-                    msg, sender, link = candidates[selected_index - 1]
-                    existing = eng.db.ex_by_link(link)
-                    sender_name = (f"@{sender.username}"
-                                   if getattr(sender, "username", None)
-                                   else (getattr(sender, "first_name", "")
-                                         or str(sender.id)))
-                    if not existing:
-                        rec, is_new = eng.db.ex_add(sender.id, sender_name, link)
-                        if rec and is_new:
-                            # رفع باگ: peer_id حتماً ست شود تا رکوردِ پیش‌قدمِ جدید
-                            # هم در ex_due چک شود (طرف «نیامد» → strike/لفت/نیومدی).
-                            eng.db.ex_set(rec["id"], status="approved",
+                    if candidates:
+                        selected_index = min(pick, len(candidates))
+                        msg, sender, link = candidates[selected_index - 1]
+                        existing = eng.db.ex_by_link(link)
+                        sender_name = (f"@{sender.username}"
+                                       if getattr(sender, "username", None)
+                                       else (getattr(sender, "first_name", "")
+                                             or str(sender.id)))
+                        if not existing:
+                            rec, is_new = eng.db.ex_add(sender.id, sender_name, link)
+                            if rec and is_new:
+                                # رفع باگ: peer_id حتماً ست شود تا رکوردِ پیش‌قدمِ جدید
+                                # هم در ex_due چک شود (طرف «نیامد» → strike/لفت/نیومدی).
+                                eng.db.ex_set(rec["id"], status="approved",
+                                              direction="out", src_chat=msg.chat_id,
+                                              src_msg=msg.id, replied=0,
+                                              peer_id=sender.id, peer_name=sender_name,
+                                              note=f"پیش‌قدم — پیام شماره {selected_index} از جدیدترین‌ها")
+                                found += 1
+                        elif existing.get("status") in ("failed", "left"):
+                            # پیام جدیدی از همان کانال آمده؛ دوباره در صف Join قرار بده.
+                            eng.db.ex_set(existing["id"], status="approved",
+                                          peer_id=sender.id, peer_name=sender_name,
                                           direction="out", src_chat=msg.chat_id,
                                           src_msg=msg.id, replied=0,
-                                          peer_id=sender.id, peer_name=sender_name,
-                                          note=f"پیش‌قدم — پیام شماره {selected_index} از جدیدترین‌ها")
+                                          strikes=0, note="پیام جدید — دوباره در صف Join")
                             found += 1
-                    elif existing.get("status") in ("failed", "left"):
-                        # پیام جدیدی از همان کانال آمده؛ دوباره در صف Join قرار بده.
-                        eng.db.ex_set(existing["id"], status="approved",
-                                      peer_id=sender.id, peer_name=sender_name,
-                                      direction="out", src_chat=msg.chat_id,
-                                      src_msg=msg.id, replied=0,
-                                      strikes=0, note="پیام جدید — دوباره در صف Join")
-                        found += 1
 
             except FloodWaitError as e:
                 w = getattr(e, "seconds", 60)
+                eng.op_gate.penalize(w, "scan")
                 eng.log("warn", "scan_flood", f"{g}: {w}s")
                 await asyncio.sleep(min(w, 60))
                 continue
@@ -5772,12 +6488,20 @@ async def connect_and_run(eng, creds):
                 try:
                     check_gate.set_load(len(eng.db.ex_list("joined", 500)))
                     check_gate.maybe_decay()
+                    # دروازه‌ی عملکرد هم کم‌کم جریمه‌اش را برمی‌گرداند
+                    eng.op_gate.maybe_decay()
                 except Exception:
                     pass
                 # ── یادآوری عضو‌نشده: دو پیام «نیومدی» با فاصله‌ی تصادفی ──
                 # (پیش‌فرض ۲۰ تا ۴۰ ثانیه) و بعد از آن، اگر طرف هنوز
                 # نیامده باشد، لفت از کانالش (یا لغو تبادلِ هنوز انجام‌نشده).
                 now_rem = int(time.time())
+                # فیکسِ «سه تا پیام پشت‌سرهم»: فاصله‌ی ۲۰–۴۰ ثانیه فقط بین دو
+                # پیامِ *همان رکورد* بود؛ اگر سه رکورد هم‌زمان سررسید می‌شدند،
+                # هر سه در یک پاس و بلافاصله «نیومدی» می‌گرفتند. حالا در هر پاس
+                # حداکثر ۳ رکورد پردازش می‌شود (بقیه به پاس بعدی می‌مانند) و
+                # خودِ ارسال‌ها هم با مکثِ دروازه (۱۵–۲۰ ثانیه) از هم جدا می‌شوند.
+                _rem_msgs = 0
                 for rec in eng.db.ex_reminder_due(now_rem, 20):
                     if not rec.get("peer_id"):
                         continue
@@ -5802,15 +6526,33 @@ async def connect_and_run(eng, creds):
                     elif still is False:
                         count = int(rec.get("reminders") or 0)
                         if count < max_rem:
+                            # سقفِ پیامِ هر پاس: اگر سه پیام در این پاس رفته،
+                            # بقیه به پاس بعدی می‌مانند — پیام‌ها هرگز پشت‌سرهم
+                            # نمی‌روند. (خودِ رکورد هنوز پردازش می‌شود: عضو شد
+                            # یا لفت، مسیر خودش را دارد.)
+                            if _rem_msgs >= 3:
+                                eng.db.ex_set(rec["id"],
+                                              next_reminder=int(now2 + 15),
+                                              note="سهمیه‌ی پیامِ این پاس — بعداً")
+                                continue
                             # یادآوری بعدی «نیومدی» — فاصله تصادفی تا پیام
                             # بعدی/لفت تا پیام‌ها پشت سر هم نیایند.
-                            sent = await send_not_joined_reminder(rec)
+                            sent = await say_not_joined(rec)
+                            if sent is not None:
+                                _rem_msgs += 1
                             if sent:
                                 count += 1
                                 eng.db.ex_set(rec["id"], reminders=count,
                                               strikes=0, unk_streak=0,
                                               next_reminder=int(now2 + reminder_delay()),
                                               note="یادآوری ارسال شد")
+                            elif sent is None:
+                                # همین تازگی از مسیر دیگری پیام گرفته — این
+                                # «تلاش ناموفق» نیست؛ شمارنده دست نمی‌خورد،
+                                # فقط کمی بعد دوباره نگاه می‌کنیم.
+                                eng.db.ex_set(rec["id"],
+                                              next_reminder=int(now2 + 20),
+                                              note="پیامِ تازه رفته بود — بعداً")
                             else:
                                 # فیکس: اگر ارسال پیام ممکن نشد (ریپلای
                                 # خاموش، پیام مرجع پیدا نشد، خطای ارسال)،
@@ -5932,7 +6674,7 @@ async def connect_and_run(eng, creds):
                                 and not int(rec.get("replied") or 0)
                                 and st <= 1
                                 and max(0, int(x.get("max_reminders", 2) or 0)) >= 1):
-                            sent0 = await send_not_joined_reminder(rec)
+                            sent0 = await say_not_joined(rec)
                             nowf = int(time.time())
                             eng.db.ex_set(rec["id"],
                                           strikes=1, unk_streak=0, last_check=nowf,
@@ -5963,7 +6705,7 @@ async def connect_and_run(eng, creds):
                             if x["reply"] and rec.get("peer_id") and ok:
                                 rec2 = eng.db.ex_get(rec["id"])
                                 if not int(rec2.get("reminders") or 0):
-                                    await send_not_joined_reminder(rec2)
+                                    await say_not_joined(rec2)
                             if eng.ex_cfg().get("report_mode", "live") == "live":
                                 await note(eng.ex_live_leave_text(rec, "" if ok else err))
                         else:
@@ -5972,7 +6714,7 @@ async def connect_and_run(eng, creds):
                             extra_total = 0
                             if x["reply"] and rec.get("peer_id") and st == 1 \
                                     and reminded < max(1, int(x.get("max_reminders", 2) or 1)):
-                                sent = await send_not_joined_reminder(eng.db.ex_get(rec["id"]))
+                                sent = await say_not_joined(eng.db.ex_get(rec["id"]))
                                 if sent:
                                     reminded += 1
                                     extra_total = 1
@@ -6084,11 +6826,22 @@ async def connect_and_run(eng, creds):
                             await asyncio.sleep(1)
                             continue
                         eng.log("info", "ex_join_try", f"#{rec['id']} {rec['link']}")
+                        # فیکسِ تایم‌اوتِ کاذب: join_link حالا اول پشتِ صفِ
+                        # تک‌نفره و مکثِ دروازه می‌ایستد، پس ۶۰ ثانیه دیگر
+                        # کافی نیست و جوینِ سالم «TimeoutError» می‌گرفت.
+                        # مهلت = زمانِ واقعیِ درخواست (۶۰) + صفِ تخمینیِ دروازه.
+                        try:
+                            _gw = eng.op_gate.wait("join")
+                        except Exception:
+                            _gw = 0
+                        _jt = int(60 + min(900, max(0, _gw)))
                         try:
                             ok, msg, title = await asyncio.wait_for(
-                                join_link(rec["link"]), timeout=60)
+                                join_link(rec["link"]), timeout=_jt)
                         except asyncio.TimeoutError:
-                            ok, msg, title = False, "TimeoutError: درخواست Join بیشتر از ۶۰ ثانیه طول کشید", ""
+                            ok, msg, title = False, (
+                                f"TimeoutError: درخواست Join بیشتر از "
+                                f"{fa(_jt)} ثانیه طول کشید"), ""
                         if ok:
                             eng.join_thr.record()
                             joined_now = int(time.time())
