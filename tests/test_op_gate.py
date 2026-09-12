@@ -69,8 +69,8 @@ T = 1_700_000_000.0
 og = m.DEFAULTS["opgate"]
 check(og["on"] is True, "1: دروازه پیش‌فرض روشن است")
 check(og["serialize"] is True, "1: صفِ تک‌نفره پیش‌فرض روشن است (دونه‌دونه)")
-check(float(og["pause_min_sec"]) == 0.6 and float(og["pause_max_sec"]) == 1.8,
-      "1: مکث پیش‌فرض بعد از هر عملیات ۰.۶ تا ۱.۸ ثانیه")
+check(float(og["pause_min_sec"]) == 15 and float(og["pause_max_sec"]) == 20,
+      "1: مکث پیش‌فرض بعد از هر عملیات ۱۵ تا ۲۰ ثانیه (درخواست صاحب‌حساب)")
 check(int(og["budget_per_min"]) == 40, "1: بودجه پیش‌فرض ۴۰ واحد در دقیقه")
 check(float(og["min_gap_sec"]) == 0.4, "1: حداقل فاصله پیش‌فرض ۰.۴ ثانیه")
 check(int(og["window_sec"]) == 60, "1: پنجره پیش‌فرض ۶۰ ثانیه")
@@ -404,8 +404,8 @@ check('eng.op_gate.hold("note")' in src[k:k + 500],
       "12: گزارش‌های PV هم در همان صف می‌روند")
 
 k = src.find("async def _say(")
-check('eng.op_gate.hold("send")' in src[k:k + 900],
-      "12: پاسخِ پنل هم در صف است")
+check('eng.op_gate.hold("send", quick=True)' in src[k:k + 900],
+      "12: پاسخِ پنل هم در صف است (بدون مکثِ بلند، تا کاربر معطل نماند)")
 
 k = src.find("async def find_their_channel")
 k2 = src.find("# ---------- دریافت درخواست تبادل", k)
@@ -626,6 +626,99 @@ out = eng.exchange_cmd("دروازه پشت‌سرهم روشن")
 check(eng.op_gate.serialize is True and eng.st["opgate"]["serialize"] is True,
       "15: «پشت‌سرهم روشن» صف را برمی‌گرداند")
 print("DONE 15 new commands")
+
+
+# ════════════════════════════════════════════════════════════
+# 16 — باگِ «سه تا نیومدی پشت‌سرهم»
+# ════════════════════════════════════════════════════════════
+# الف) پاسِ یادآوری در هر پاس حداکثر ۳ رکورد را پردازش می‌کند
+k = src.find("# ── یادآوری عضو‌نشده")
+k2 = src.find("# ۳) چک دوره‌ای", k)
+seg = src[k:k2]
+check("_rem_msgs >= 3" in seg,
+      "16: پاسِ یادآوری سقفِ ۳ «پیام» در هر پاس دارد (رکورد نه — عضو شد/لفت راه خودش را دارد)")
+check("await say_not_joined(rec)" in seg,
+      "16: یادآوری از محافظِ ضدِ تکرار رد می‌شود")
+check("elif sent is None:" in seg,
+      "16: پیامِ ردشده «تلاش ناموفق» حساب نمی‌شود (لفتِ بی‌جا نمی‌دهد)")
+
+# ب) محافظِ ضدِ تکرار: به یک نفر دو بار پشت‌سرهم «نیومدی» نمی‌رود
+k = src.find("    def recently_messaged(rec):")
+k2 = src.find("    async def send_not_joined_reminder(rec):", k)
+fn = src[k:k2]
+fn = "\n".join(ln[4:] if ln.startswith("    ") else ln for ln in fn.splitlines())
+
+sent_log = []
+
+
+async def fake_send(rec):
+    sent_log.append(rec["id"])
+    return True
+
+
+eng = fresh_engine()
+ns = {"eng": eng, "send_not_joined_reminder": fake_send}
+exec(fn, ns)
+say_not_joined = ns["say_not_joined"]
+
+rec_a = {"id": 1, "peer_id": 777, "link": "@aaa"}
+rec_b = {"id": 2, "peer_id": 888, "link": "@bbb"}
+
+r1 = _aio.run(say_not_joined(rec_a))
+check(r1 is True and sent_log == [1], "16: پیام اول می‌رود")
+r2 = _aio.run(say_not_joined(rec_a))
+check(r2 is None and sent_log == [1],
+      "16: پیام دوم به همان نفر رد می‌شود (نه پشت‌سرهم)")
+r3 = _aio.run(say_not_joined(rec_b))
+check(r3 is True and sent_log == [1, 2],
+      "16: نفرِ دوم پیام خودش را می‌گیرد (قفلِ سراسری نیست)")
+
+# بعد از گذشتنِ بازه‌ی یادآوری، دوباره مجاز است
+eng.op_gate.last_msg["777"] = time.time() - 600
+r4 = _aio.run(say_not_joined(rec_a))
+check(r4 is True and sent_log == [1, 2, 1],
+      "16: بعد از گذشتن بازه، پیامِ بعدی مجاز است")
+
+# د) مسیرِ ریپلایِ رویداد هم سابقه‌ی پیام را ثبت می‌کند (وگرنه حلقه پشتِ
+#    سرش یک «نیومدی» دیگر می‌فرستد)
+check('eng.op_gate.note_msg(str(getattr(sender, "id", 0)' in src,
+      "16: پیامِ مسیرِ رویداد هم در سابقه ثبت می‌شود")
+
+# ج) خودِ دروازه هم زمانِ پیام‌ها را نگه می‌دارد
+gg = m.OpGate(m.DEFAULTS["opgate"])
+check(gg.since_msg("x") is None, "16: قبل از هر پیام، سابقه‌ای نیست")
+gg.note_msg("x", now=T)
+check(abs(gg.since_msg("x", T + 5) - 5.0) < 1e-9, "16: سابقه‌ی پیام درست حساب می‌شود")
+print("DONE 16 no burst")
+
+
+# ════════════════════════════════════════════════════════════
+# 17 — تایم‌اوتِ کاذبِ جوین (رگرسیونِ صف)
+# ════════════════════════════════════════════════════════════
+k = src.find('eng.log("info", "ex_join_try"')
+seg = src[k:k + 1400]
+check('eng.op_gate.wait("join")' in seg and "60 + min(900" in seg,
+      "17: مهلتِ جوین = ۶۰ ثانیه + صفِ تخمینیِ دروازه")
+check("timeout=60)" not in seg, "17: تایم‌اوتِ ثابتِ ۶۰ ثانیه حذف شد")
+print("DONE 17 join timeout")
+
+
+# ════════════════════════════════════════════════════════════
+# 18 — رفتارِ واقعی با مکثِ پیش‌فرض ۱۵ ثانیه
+# ════════════════════════════════════════════════════════════
+g = m.OpGate(m.DEFAULTS["opgate"])
+t = T
+g.record("send", now=t)
+g._after_op(now=t)
+w = g.wait("send", now=t)
+check(15.0 <= w <= 20.0,
+      "18: با تنظیمِ پیش‌فرض، عملیات بعدی ۱۵ تا ۲۰ ثانیه بعد می‌رود")
+g._after_op(now=t, quick=True)
+check(g.wait("send", now=t) < 1.0,
+      "18: جوابِ پنل (quick) پشتِ مکثِ ۱۵ ثانیه‌ای نمی‌ماند")
+check('hold("send", quick=True)' in src,
+      "18: پاسخِ پنل واقعاً quick صدا زده می‌شود")
+print("DONE 18 default pacing")
 
 
 print("FAILED " + "; ".join(FAILS) if FAILS else "DONE PASS")
