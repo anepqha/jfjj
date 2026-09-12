@@ -683,6 +683,11 @@ check(r4 is True and sent_log == [1, 2, 1],
 #    سرش یک «نیومدی» دیگر می‌فرستد)
 check('eng.op_gate.note_msg(str(getattr(sender, "id", 0)' in src,
       "16: پیامِ مسیرِ رویداد هم در سابقه ثبت می‌شود")
+k = src.find("async def say(key, channel=")
+k2 = src.find("# ── عضو نیست → «نیومدی»", k)
+seg2 = src[k:k2]
+check('if used == "msg_no":' in seg2 and "eng.op_gate.since_msg(" in seg2,
+      "16: مسیرِ ریپلای هم «نیومدیِ» تکراری را نمی‌فرستد")
 
 # ج) خودِ دروازه هم زمانِ پیام‌ها را نگه می‌دارد
 gg = m.OpGate(m.DEFAULTS["opgate"])

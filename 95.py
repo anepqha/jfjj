@@ -6070,6 +6070,21 @@ async def connect_and_run(eng, creds):
             # ارسال یک تأخیر انسانی ۵–۱۸ ثانیه می‌گیرند تا شکل رباتی نداشته باشد.
             # پیام موفق (msg_ok/msg_come) مسیر خودش را دارد (reply_joined با
             # بازه‌ی ۱۱–۴۸ ثانیه) و از این تأخیر عبور نمی‌کند.
+            # ضدِ تکرار: اگر همین تازگی «نیومدی» گرفته (مثلاً حلقه‌ی
+            # یادآوری چند ثانیه پیش فرستاده)، همان متن را دوباره نمی‌گوییم.
+            # این همان «دو تا پیام پشت‌سرهم» است که از دو مسیرِ مختلف می‌آمد.
+            if used == "msg_no":
+                try:
+                    _gap = max(5, int(x.get("reminder_min_sec", 20) or 20))
+                    _ago = eng.op_gate.since_msg(
+                        str(getattr(sender, "id", 0) or 0))
+                    if _ago is not None and _ago < _gap:
+                        eng.log("info", "ex_reply_skip",
+                                f"{sender_name}: {int(_ago)}s پیش «نیومدی» "
+                                "گرفته — تکرار نمی‌شود")
+                        return False
+                except Exception:
+                    pass
             if key in ("msg_no", "msg_wait", "msg_nolink"):
                 await asyncio.sleep(reply_delay_seconds())
             try:
